@@ -1,0 +1,47 @@
+﻿kgs:
+  - kg_id: organs
+    name: Polifonia Organs Knowledge Graph
+    project: Polifonia
+    description_hint: >
+      Knowledge graph describing historical pipe organs, their builders,
+      locations, construction events, and related heritage information.
+    sparql:
+      endpoint: https://polifonia.kmi.open.ac.uk/organs/sparql
+      auth: none
+    repos:
+      - https://github.com/polifonia-project/organs-kg
+    priority: high
+    notes: >
+      Already partially curated manually. Use as baseline for automation tests.
+
+  - kg_id: meetups
+    name: Polifonia MEETUPS Knowledge Graph
+    project: Polifonia
+    description_hint: >
+      Knowledge graph describing musical events, meetings, performances,
+      participants, places, and times.
+    sparql:
+      endpoint: https://polifonia.kmi.open.ac.uk/meetups/sparql
+      auth: none
+    repos:
+      - https://github.com/polifonia-project/meetups-kg
+    docs:
+      - https://polifonia.kmi.open.ac.uk/meetups/queries
+    priority: high
+    notes: >
+      Provides a page of example SPARQL queries – ideal for bootstrapping pairs.
+
+  - kg_id: musicbo
+    name: Polifonia MusicBO Knowledge Graph
+    project: Polifonia
+    description_hint: >
+      Knowledge graph derived from Bologna’s musical heritage, focusing on
+      composers, works, performances, and archival sources.
+    sparql:
+      endpoint: https://polifonia.disi.unibo.it/musicbo/sparql
+      auth: none
+    repos:
+      - https://github.com/polifonia-project/musicbo-kg
+    priority: medium
+    notes: >
+      Repo contains SPARQL examples embedded in documentation rather than .rq files.
