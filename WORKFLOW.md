@@ -1,0 +1,258 @@
+# Workflow: Collecting NL–SPARQL Pairs for Musicological Knowledge Graphs
+
+This repository implements a **reproducible pipeline for collecting, testing, and curating natural-language question–SPARQL query pairs** for musicological Knowledge Graphs (KGs). The resulting dataset is designed for evaluation, benchmarking, and ingestion into systems such as **Quagga**.
+
+The workflow deliberately separates **control**, **deterministic processing**, and **LLM-assisted interpretation** to ensure auditability and long-term maintainability.
+
+---
+
+## 0. Design principles
+
+- **YAML = control plane**  
+  Defines what to process and where to find it. No results, no prose.
+
+- **JSONL = curated outputs**  
+  One record per line for KGs and NL–SPARQL pairs. Easy to diff, stream, and transform.
+
+- **Python = truth layer**  
+  Repo cloning, SPARQL execution, timeouts, provenance, filtering.
+
+- **LLMs = language and interpretation layer**  
+  KG descriptions, natural-language questions, confidence estimates.
+
+This separation avoids hidden state, supports regeneration, and keeps the dataset defensible.
+
+---
+
+## 1. Seed definition (`seeds.yaml`)
+
+**Purpose:** define which KGs to process and where their technical resources live.
+
+Each KG entry typically includes:
+
+- `kg_id` (stable identifier)
+- human-readable name
+- short `description_hint` (prompt hint, not authoritative)
+- SPARQL endpoint (if available)
+- repository URLs
+- optional documentation links
+- priority and notes
+
+Example:
+
+    kgs:
+      - kg_id: meetups
+        name: Polifonia MEETUPS Knowledge Graph
+        project: Polifonia
+        description_hint: >
+          Musical encounters and collaborations extracted from
+          musician biographies (c. 1800–1945).
+        sparql:
+          endpoint: https://polifonia.kmi.open.ac.uk/meetups/sparql
+          auth: none
+        repos:
+          - https://github.com/polifonia-project/meetups-kg
+
+`seeds.yaml` is version-controlled and changes infrequently.
+
+---
+
+## 2. KG description generation (`kgs.jsonl`)
+
+**Goal:** produce Quagga-ready KG records with rich, citable descriptions.
+
+### Inputs
+
+- `seeds.yaml`
+- KG README files
+- project websites
+- related academic papers (abstracts or introductions)
+
+### Process
+
+For each KG:
+
+1. Collect textual sources.
+2. Use an LLM to generate a **120–180 word descriptive paragraph** suitable for a KG catalogue.
+3. Record provenance (URLs and papers used).
+
+### Output
+
+`kgs.jsonl`, one KG per line, for example:
+
+    {
+      "kg_id": "meetups",
+      "name": "Polifonia MEETUPS Knowledge Graph",
+      "description": "...",
+      "endpoint": "https://...",
+      "repos": ["https://github.com/..."],
+      "description_sources": [
+        "https://github.com/...",
+        "Paper DOI ..."
+      ]
+    }
+
+This file contains the **authoritative KG descriptions**.
+
+---
+
+## 3. SPARQL query extraction (`raw_queries.jsonl`)
+
+**Goal:** collect all candidate SPARQL queries with full provenance, without interpretation.
+
+### Inputs
+
+- repositories listed in `seeds.yaml`
+- documentation pages with example queries
+- academic papers containing SPARQL or competency questions (CQs)
+
+### Process (deterministic, Python)
+
+- Clone repositories.
+- Extract:
+  - `.rq` and `.sparql` files
+  - embedded SPARQL in code or documentation
+- Normalise whitespace and prefixes.
+- Deduplicate by hash.
+- Record provenance:
+  - repository URL
+  - file path
+  - commit hash
+  - line spans (if available)
+
+### Output
+
+`raw_queries.jsonl`
+
+No filtering and no LLM use at this stage.
+
+---
+
+## 4. Query execution and filtering (`runnable_queries.jsonl`)
+
+**Goal:** keep only queries that actually run.
+
+### Inputs
+
+- `raw_queries.jsonl`
+- SPARQL endpoints from `seeds.yaml`
+
+### Process (deterministic)
+
+For each query:
+
+- Execute against the endpoint with a timeout.
+- Record:
+  - execution status (`ok`, `empty`, `timeout`, `parse_error`, `auth`, etc.)
+  - timestamp
+  - optional first result row
+- Keep queries that parse and execute (`ok` or `empty`).
+
+### Output
+
+`runnable_queries.jsonl`
+
+This step establishes **ground-truth executability**.
+
+---
+
+## 5. Natural-language question and confidence generation (`pairs.jsonl`)
+
+**Goal:** create human-readable NL–SPARQL pairs with confidence estimates.
+
+### Inputs
+
+- `runnable_queries.jsonl`
+- KG descriptions from `kgs.jsonl`
+- optional sample result rows
+
+### Process (LLM with schema enforcement)
+
+For each runnable query, generate an object of the form:
+
+    {
+      "nl_question": "...",
+      "confidence_percent": 92,
+      "confidence_reason": "..."
+    }
+
+Guidelines:
+
+- Prefer **simple, human phrasing**.
+- Avoid ontology jargon unless unavoidable.
+- Lower confidence if semantics are ambiguous.
+
+Optionally run a second **consistency-check pass** to downgrade overconfident pairs.
+
+### Filtering rule
+
+- Keep only pairs with `confidence_percent ≥ 85`.
+- Lower-confidence pairs go to review or discard.
+
+### Output
+
+`pairs.jsonl`, one pair per line, including:
+
+- natural-language question
+- SPARQL query
+- confidence score and rationale
+- provenance
+- endpoint
+- test status
+
+This file is the **core dataset**.
+
+---
+
+## 6. Academic paper integration (parallel track)
+
+For each KG:
+
+- Identify canonical papers.
+- Extract:
+  - SPARQL examples
+  - competency questions (CQs)
+
+If only CQs exist:
+
+- Optionally draft SPARQL (marked as `crafted_from_cq`).
+- Assign lower confidence unless verified against an endpoint.
+
+Paper-derived queries pass through the **same pipeline** as repo-derived ones.
+
+---
+
+## 7. Outputs and intended use
+
+At minimum, the project produces:
+
+- `seeds.yaml` – control input
+- `kgs.jsonl` – KG catalogue (Quagga-ready)
+- `pairs.jsonl` – validated NL–SPARQL pairs
+
+These outputs can be:
+
+- ingested into Quagga
+- used for evaluation or benchmarking
+- published as a dataset
+- extended with additional KGs
+
+---
+
+## 8. Why this workflow works
+
+- Every artefact is reproducible.
+- Every query is runnable or explicitly marked otherwise.
+- Every NL question has an explicit confidence estimate.
+- Provenance is preserved end-to-end.
+- LLM use is restricted to tasks where it adds value (language, summarisation).
+
+---
+
+## 9. Current status
+
+- Git repository initialised and pushed
+- `seeds.yaml` committed (initial Polifonia KGs)
+- SSH authentication confirmed
+
+**Next step:** implement `build_kgs.py` or run one KG (e.g. MEETUPS) end-to-end as a reference implementation.
