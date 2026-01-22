@@ -9,7 +9,7 @@
       endpoint: https://polifonia.kmi.open.ac.uk/organs/sparql
       auth: none
     repos:
-      - https://github.com/polifonia-project/organs-kg
+      - https://github.com/polifonia-project/organs-knowledge-graph
     priority: high
     notes: >
       Already partially curated manually. Use as baseline for automation tests.
@@ -24,9 +24,9 @@
       endpoint: https://polifonia.kmi.open.ac.uk/meetups/sparql
       auth: none
     repos:
-      - https://github.com/polifonia-project/meetups-kg
+      - https://github.com/polifonia-project/meetups-knowledge-graph
     docs:
-      - https://polifonia.kmi.open.ac.uk/meetups/queries
+      - https://polifonia.kmi.open.ac.uk/meetups/queries.php
     priority: high
     notes: >
       Provides a page of example SPARQL queries – ideal for bootstrapping pairs.
@@ -41,7 +41,7 @@
       endpoint: https://polifonia.disi.unibo.it/musicbo/sparql
       auth: none
     repos:
-      - https://github.com/polifonia-project/musicbo-kg
+      - https://github.com/polifonia-project/musicbo-knowledge-graph
     priority: medium
     notes: >
       Repo contains SPARQL examples embedded in documentation rather than .rq files.
