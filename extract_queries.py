@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+"""
+Extract SPARQL queries from Git repositories listed in `seeds.yaml`.:
+1) Read `seeds.yaml` for KG IDs and repo URLs.
+2) Clone repos into `repos/` if missing, and record current commit hash.
+3) Walk repo files and extract queries from `.rq`, `.sparql`, and fenced
+   ```sparql blocks in Markdown.
+4) Normalize queries, keep only SELECT queries, and deduplicate by sha256.
+5) Write `raw_queries.jsonl` (one JSON object per query).
+"""
+
 import hashlib
 import json
 import re
@@ -86,6 +96,64 @@ def normalize_query(text: str) -> str:
     return normalized
 
 
+def split_queries(text: str) -> List[str]:
+    lines = text.splitlines()
+    keyword_re = re.compile(
+        r"^\s*(select|construct|ask|describe|insert|delete|with|load|clear|create|drop|copy|move|add)\b",
+        re.IGNORECASE,
+    )
+    meta_re = re.compile(r"^\s*(prefix|base)\b", re.IGNORECASE)
+
+    def is_meta_line(line: str) -> bool:
+        stripped = line.strip()
+        if not stripped:
+            return True
+        if stripped.startswith("#"):
+            return True
+        return bool(meta_re.match(stripped))
+
+    def strip_line_comments(line: str) -> str:
+        # Only strip full-line comments; avoid breaking IRIs like http://...
+        if line.lstrip().startswith("#"):
+            return ""
+        return line
+
+    starts: List[int] = []
+    depth = 0
+    for idx, line in enumerate(lines):
+        if depth == 0 and keyword_re.match(line):
+            starts.append(idx)
+        clean = strip_line_comments(line)
+        depth += clean.count("{") - clean.count("}")
+
+    if len(starts) <= 1:
+        return [text]
+
+    adjusted: List[int] = []
+    last_start = -1
+    for start in starts:
+        adj = start
+        while adj > last_start + 1 and is_meta_line(lines[adj - 1]):
+            adj -= 1
+        if adj <= last_start:
+            adj = start
+        adjusted.append(adj)
+        last_start = adj
+
+    # Ensure the first segment includes any leading metadata.
+    if adjusted[0] != 0:
+        adjusted = [0] + adjusted
+
+    adjusted = sorted(set(adjusted))
+    segments: List[str] = []
+    for i, start in enumerate(adjusted):
+        end = adjusted[i + 1] if i + 1 < len(adjusted) else None
+        segment = "\n".join(lines[start:end]).strip()
+        if segment:
+            segments.append(segment)
+    return segments or [text]
+
+
 def is_select_query(text: str) -> bool:
     # Strip comments and PREFIX/BASE to find the main query verb.
     cleaned_lines: List[str] = []
@@ -130,9 +198,16 @@ def extract_queries_from_file(path: Path) -> List[Dict[str, str]]:
         return []
 
     if suffix in {".rq", ".sparql"}:
-        return [{"source_type": "repo_file", "query": text}]
+        return [
+            {"source_type": "repo_file", "query": q}
+            for q in split_queries(text)
+        ]
     if suffix == ".md":
-        return [{"source_type": "md_fence", "query": q} for q in extract_queries_from_md(text)]
+        queries: List[Dict[str, str]] = []
+        for block in extract_queries_from_md(text):
+            for q in split_queries(block):
+                queries.append({"source_type": "md_fence", "query": q})
+        return queries
     return []
 
 
