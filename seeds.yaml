@@ -6,7 +6,7 @@
       Knowledge graph describing historical pipe organs, their builders,
       locations, construction events, and related heritage information.
     sparql:
-      endpoint: https://polifonia.kmi.open.ac.uk/organs/sparql
+      endpoint: https://polifonia.disi.unibo.it/organs/sparql
       auth: none
     repos:
       - https://github.com/polifonia-project/organs-knowledge-graph
@@ -21,7 +21,7 @@
       Knowledge graph describing musical events, meetings, performances,
       participants, places, and times.
     sparql:
-      endpoint: https://polifonia.kmi.open.ac.uk/meetups/sparql
+      endpoint: https://polifonia.disi.unibo.it/meetups/sparql
       auth: none
     repos:
       - https://github.com/polifonia-project/meetups-knowledge-graph
@@ -30,6 +30,33 @@
     priority: high
     notes: >
       Provides a page of example SPARQL queries – ideal for bootstrapping pairs.
+
+  - kg_id: musow
+    name: MUSOW Knowledge Graph
+    project: Polifonia
+    description_hint: >
+      Conceptual and registry-style knowledge graph modelling musicological
+      concepts, vocabularies, and scholarly classifications using SKOS and
+      related ontologies.
+    sparql:
+      endpoint: https://polifonia.disi.unibo.it/meetups/sparql
+      auth: none
+      expected_namespaces:
+        - http://w3id.org/polifonia/ontology/musow#
+        - http://www.w3.org/2004/02/skos/core#
+    repos:
+      - https://github.com/polifonia-project/registry-data
+      - https://github.com/polifonia-project/musow-licences-experiments-llm
+    docs:
+      - https://polifonia-project.eu/musow
+    priority: medium
+    notes: >
+      MUSOW is a conceptual and registry-style knowledge graph developed in the
+      Polifonia project, modelling musicological concepts, vocabularies, and
+      scholarly classifications using SKOS and related ontologies. While it is
+      not an event-based KG, it is accompanied by curated SPARQL query examples
+      and query guides, making it suitable for collecting runnable SELECT
+      queries and generating natural-language question–SPARQL pairs.
 
   - kg_id: musicbo
     name: Polifonia MusicBO Knowledge Graph

@@ -34,7 +34,7 @@ Each KG entry typically includes:
 - human-readable name
 - short `description_hint` (prompt hint, not authoritative)
 - SPARQL endpoint (if available)
-- repository URLs
+- repository URLs (one or more)
 - optional documentation links
 - priority and notes
 
