@@ -5,6 +5,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -17,6 +18,7 @@ import yaml
 class SparqlConfig:
     endpoint: str
     auth: str = "none"
+    expected_namespaces: Optional[List[str]] = None
 
 
 @dataclass
@@ -166,11 +168,23 @@ def parse_kg_seed(raw: Dict[str, Any]) -> KGSeed:
             raise ValueError(f"KG '{kg_id}': 'sparql' must be a mapping (dict).")
         endpoint = sparql.get("endpoint")
         auth = sparql.get("auth", "none")
+        expected_namespaces = sparql.get("expected_namespaces")
         if not isinstance(endpoint, str) or not endpoint.strip():
             raise ValueError(f"KG '{kg_id}': sparql.endpoint must be a non-empty string.")
         if not isinstance(auth, str):
             raise ValueError(f"KG '{kg_id}': sparql.auth must be a string.")
-        sparql_cfg = SparqlConfig(endpoint=endpoint.strip(), auth=auth.strip())
+        if expected_namespaces is not None:
+            if not isinstance(expected_namespaces, list) or not all(
+                isinstance(x, str) for x in expected_namespaces
+            ):
+                raise ValueError(
+                    f"KG '{kg_id}': sparql.expected_namespaces must be a list of strings."
+                )
+        sparql_cfg = SparqlConfig(
+            endpoint=endpoint.strip(),
+            auth=auth.strip(),
+            expected_namespaces=expected_namespaces,
+        )
 
     return KGSeed(
         kg_id=kg_id.strip(),
@@ -186,16 +200,30 @@ def parse_kg_seed(raw: Dict[str, Any]) -> KGSeed:
 
 
 def kgseed_to_record(kg: KGSeed) -> Dict[str, Any]:
+    today = date.today().isoformat()
+    sparql_obj = None
+    if kg.sparql:
+        sparql_obj = {
+            "endpoint": kg.sparql.endpoint,
+            "auth": kg.sparql.auth,
+            "graph": None,
+        }
+        if kg.sparql.expected_namespaces:
+            sparql_obj["expected_namespaces"] = list(kg.sparql.expected_namespaces)
     return {
         "kg_id": kg.kg_id,
         "name": kg.name,
         "project": kg.project,
-        "endpoint": kg.sparql.endpoint if kg.sparql else None,
+        "description": None,
+        "sparql": sparql_obj,
+        "dataset": {"dump_url": None, "local_path": None, "format": None},
         "repos": list(kg.repos or []),
         "docs": list(kg.docs or []),
+        "notes": kg.notes,
+        "created_at": today,
+        "updated_at": today,
         "description_hint": kg.description_hint,
         "priority": kg.priority,
-        "notes": kg.notes,
     }
 
 

@@ -5,6 +5,7 @@ import json
 import re
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -53,14 +54,14 @@ def load_endpoints(path: Path) -> Dict[str, KGEndpoint]:
     return endpoints
 
 
-def load_raw_queries(path: Path) -> List[Dict[str, object]]:
+def load_query_records(path: Path) -> List[Dict[str, object]]:
     if not path.exists():
         raise FileNotFoundError(f"Missing file: {path}")
     text = path.read_text(encoding="utf-8-sig")
     if text.lstrip().startswith("["):
         data = json.loads(text)
         if not isinstance(data, list):
-            raise ValueError("raw_queries.jsonl must be a JSON array or JSONL.")
+            raise ValueError("kg_queries.jsonl must be a JSON array or JSONL.")
         return data
 
     records: List[Dict[str, object]] = []
@@ -235,46 +236,75 @@ def preflight_endpoint(endpoint: KGEndpoint) -> None:
 
 def main() -> None:
     seeds_path = Path("seeds.yaml")
-    raw_path = Path("raw_queries.jsonl")
-    out_path = Path("runnable_queries.jsonl")
+    queries_path = Path("kg_queries.jsonl")
+    out_path = queries_path
     fail_path = Path("runnable_queries.failures.jsonl")
 
     endpoints = load_endpoints(seeds_path)
-    raw_queries = load_raw_queries(raw_path)
+    raw_queries = load_query_records(queries_path)
 
     for endpoint in endpoints.values():
         preflight_endpoint(endpoint)
 
-    records: List[Dict[str, object]] = []
+    records: List[Dict[str, object]] = raw_queries
     skipped_no_endpoint = 0
     kept = 0
     failures: List[Dict[str, object]] = []
     endpoint_success: Dict[str, int] = {}
+    stats: Dict[str, Dict[str, int]] = {}
     for rec in raw_queries:
         kg_id = rec.get("kg_id")
-        query = rec.get("query")
+        query = rec.get("sparql_clean")
         if not isinstance(kg_id, str) or not isinstance(query, str):
             continue
+        stat = stats.setdefault(
+            kg_id,
+            {
+                "attempted": 0,
+                "ran": 0,
+                "ok": 0,
+                "empty": 0,
+                "failed": 0,
+                "skipped_no_endpoint": 0,
+                "skipped_local": 0,
+            },
+        )
+        stat["attempted"] += 1
         endpoint = endpoints.get(kg_id)
         if endpoint is None:
             skipped_no_endpoint += 1
+            stat["skipped_no_endpoint"] += 1
             continue
 
-        query = clean_query(query)
-        query = ensure_prefixes(query)
-        query = apply_graph(query, endpoint.graph)
-        if not is_remote_executable(query):
+        query_to_run = clean_query(query)
+        query_to_run = ensure_prefixes(query_to_run)
+        query_to_run = apply_graph(query_to_run, endpoint.graph)
+        if not is_remote_executable(query_to_run):
             failures.append(
                 {
                     "kg_id": kg_id,
                     "endpoint": endpoint.endpoint,
                     "status": "skipped_local_query",
-                    "path": rec.get("path"),
-                    "hash": rec.get("hash"),
+                    "query_id": rec.get("query_id"),
+                    "query_label": rec.get("query_label"),
+                    "sparql_hash": rec.get("sparql_hash"),
                 }
             )
+            stat["skipped_local"] += 1
+            rec["latest_run"] = {
+                "ran_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                "status": "skipped_local_query",
+                "endpoint": endpoint.endpoint,
+                "result_count": None,
+                "sample_row": None,
+                "duration_ms": 0,
+                "error": None,
+            }
             continue
-        result = run_select_query(endpoint.endpoint, query)
+        stat["ran"] += 1
+        start = time.time()
+        result = run_select_query(endpoint.endpoint, query_to_run)
+        duration_ms = int((time.time() - start) * 1000)
         if result.get("status") in {"ok", "empty"}:
             endpoint_success[kg_id] = endpoint_success.get(kg_id, 0) + 1
         elif result.get("status") == "http_error" and result.get("http_status") == 500:
@@ -282,13 +312,34 @@ def main() -> None:
                 # Retry once or twice if the endpoint works for other queries.
                 for delay_s in (1.0, 2.0):
                     time.sleep(delay_s)
-                    retry = run_select_query(endpoint.endpoint, query)
+                    retry_start = time.time()
+                    retry = run_select_query(endpoint.endpoint, query_to_run)
+                    duration_ms = int((time.time() - retry_start) * 1000)
                     if retry.get("status") in {"ok", "empty"}:
                         result = retry
                         endpoint_success[kg_id] = endpoint_success.get(kg_id, 0) + 1
                         break
                     result = retry
         status = result.get("status")
+        latest_run = {
+            "ran_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "status": status,
+            "endpoint": endpoint.endpoint,
+            "result_count": result.get("result_count"),
+            "sample_row": result.get("sample_row"),
+            "duration_ms": duration_ms,
+            "error": result.get("error"),
+        }
+        if result.get("http_status") is not None:
+            latest_run["http_status"] = result.get("http_status")
+        if result.get("content_type") is not None:
+            latest_run["content_type"] = result.get("content_type")
+        rec["latest_run"] = latest_run
+        run_history = rec.get("run_history")
+        if not isinstance(run_history, list):
+            run_history = []
+        run_history.append(latest_run)
+        rec["run_history"] = run_history
         if status not in {"ok", "empty"}:
             failures.append(
                 {
@@ -298,19 +349,19 @@ def main() -> None:
                     "http_status": result.get("http_status"),
                     "content_type": result.get("content_type"),
                     "error": result.get("error"),
-                    "path": rec.get("path"),
-                    "hash": rec.get("hash"),
+                    "query_id": rec.get("query_id"),
+                    "query_label": rec.get("query_label"),
+                    "sparql_hash": rec.get("sparql_hash"),
                     "body_snippet": result.get("body_snippet"),
                 }
             )
+            stat["failed"] += 1
             continue
-
-        out: Dict[str, object] = dict(rec)
-        out["endpoint"] = endpoint.endpoint
-        out["run_status"] = status
-        out["result_count"] = result.get("result_count")
-        out["sample_row"] = result.get("sample_row")
-        records.append(out)
+        if status == "ok":
+            stat["ok"] += 1
+        else:
+            stat["empty"] += 1
+        rec["latest_successful_run"] = latest_run
         kept += 1
 
     with out_path.open("w", encoding="utf-8") as f:
@@ -321,6 +372,19 @@ def main() -> None:
         for rec in failures:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
+    if stats:
+        print("\nPer-KG run stats:")
+        for kg_id in sorted(stats):
+            stat = stats[kg_id]
+            attempted = stat["attempted"]
+            ran = stat["ran"]
+            runnable = stat["ok"] + stat["empty"]
+            print(
+                f"- {kg_id}: runnable {runnable}/{attempted} (ran={ran}, "
+                f"ok={stat['ok']}, empty={stat['empty']}, failed={stat['failed']}, "
+                f"skipped_no_endpoint={stat['skipped_no_endpoint']}, "
+                f"skipped_local={stat['skipped_local']})"
+            )
     print(
         f"Wrote {len(records)} records to {out_path.resolve()} "
         f"(skipped_no_endpoint={skipped_no_endpoint}, kept={kept}, failed={len(failures)})"

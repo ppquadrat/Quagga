@@ -57,6 +57,120 @@ Example:
 
 ---
 
+## 1.5. Data model (schemas)
+
+To keep provenance and QA explicit, we use **two JSONL files**:
+
+- `kgs.jsonl`: one record per KG (metadata, endpoints, datasets)
+- `kg_queries.jsonl`: one record per query (SPARQL, evidence, NL artifacts)
+- `run_queries.jsonl`: same records enriched with run metadata
+
+### `kgs.jsonl` (KG metadata)
+
+Each line is a JSON object. Example:
+
+    {
+      "kg_id": "meetups",
+      "name": "Polifonia MEETUPS Knowledge Graph",
+      "project": "Polifonia",
+      "description": "...authoritative KG summary...",
+      "sparql": {
+        "endpoint": "https://polifonia.kmi.open.ac.uk/meetups/sparql",
+        "auth": "none",
+        "graph": null
+      },
+      "dataset": {
+        "dump_url": null,
+        "local_path": null,
+        "format": null
+      },
+      "repos": ["https://github.com/polifonia-project/meetups-knowledge-graph"],
+      "docs": ["https://polifonia.kmi.open.ac.uk/meetups/queries.php"],
+      "notes": "...",
+      "created_at": "2026-01-30",
+      "updated_at": "2026-01-30"
+    }
+
+### `kg_queries.jsonl` (query-centric record)
+
+One record per query, with provenance and run history:
+
+    {
+      "query_id": "musow__sha256:abc123...",
+      "kg_id": "musow",
+      "query_type": "select",
+      "sparql_raw": "...as extracted...",
+      "sparql_clean": "...normalized...",
+      "sparql_hash": "sha256:...clean...",
+      "raw_hash": "sha256:...raw...",
+      "evidence": [
+        {
+          "evidence_id": "e1",
+          "type": "repo_file",
+          "source_url": "https://github.com/.../README.md",
+          "source_path": "docs/queries.md",
+          "repo_commit": "abc123",
+          "snippet": "SELECT ...",
+          "extracted_at": "2026-01-30",
+          "extractor_version": "extract_queries.py@v1"
+        }
+      ],
+      "cq_items": [
+        {
+          "cq_id": "cq1",
+          "text": "Which vocabularies classify musical instruments?",
+          "source_evidence_ids": ["e1"]
+        }
+      ],
+      "nl_question": {
+        "text": null,
+        "source": null,
+        "generated_at": null,
+        "generator": null
+      },
+      "justification": null,
+      "comments": null,
+      "verification": {
+        "status": "unverified",
+        "notes": null
+      },
+      "latest_run": {
+        "ran_at": "2026-01-30T12:10:00Z",
+        "status": "http_error",
+        "endpoint": "https://polifonia.disi.unibo.it/meetups/sparql",
+        "result_count": null,
+        "sample_row": null,
+        "duration_ms": 1820,
+        "error": "http_500"
+      },
+      "latest_successful_run": {
+        "ran_at": "2026-01-29T10:40:00Z",
+        "status": "ok",
+        "endpoint": "https://polifonia.disi.unibo.it/meetups/sparql",
+        "result_count": 14,
+        "sample_row": {"s": "..."},
+        "duration_ms": 1200
+      },
+      "run_history": [
+        {
+          "ran_at": "2026-01-29T10:40:00Z",
+          "status": "ok",
+          "endpoint": "https://...",
+          "duration_ms": 1200
+        }
+      ]
+    }
+
+Notes:
+
+- `evidence` is the single place for raw extractions (repos/docs/papers/etc).
+- `cq_items` link CQs to evidence; later we can generate SPARQL from CQs.
+- `latest_run` and `latest_successful_run` are convenience fields; `run_history` is optional.
+- These run-related fields are populated when producing `run_queries.jsonl`.
+- `dataset` supports future KGs without endpoints (local dumps).
+
+---
+
 ## 2. KG description generation (`kgs.jsonl`)
 
 **Goal:** produce Quagga-ready KG records with rich, citable descriptions.
@@ -84,7 +198,11 @@ For each KG:
       "kg_id": "meetups",
       "name": "Polifonia MEETUPS Knowledge Graph",
       "description": "...",
-      "endpoint": "https://...",
+      "sparql": {
+        "endpoint": "https://...",
+        "auth": "none",
+        "graph": null
+      },
       "repos": ["https://github.com/..."],
       "description_sources": [
         "https://github.com/...",
@@ -96,7 +214,7 @@ This file contains the **authoritative KG descriptions**.
 
 ---
 
-## 3. SPARQL query extraction (`raw_queries.jsonl`)
+## 3. SPARQL query extraction (`kg_queries.jsonl`)
 
 **Goal:** collect all candidate SPARQL queries with full provenance, without interpretation.
 
@@ -122,19 +240,19 @@ This file contains the **authoritative KG descriptions**.
 
 ### Output
 
-`raw_queries.jsonl`
+`kg_queries.jsonl` (query records with raw SPARQL, clean SPARQL, and evidence)
 
 No filtering and no LLM use at this stage.
 
 ---
 
-## 4. Query execution and filtering (`runnable_queries.jsonl`)
+## 4. Query execution and filtering (`run_queries.jsonl`)
 
 **Goal:** keep only queries that actually run.
 
 ### Inputs
 
-- `raw_queries.jsonl`
+- `kg_queries.jsonl`
 - SPARQL endpoints from `seeds.yaml`
 
 ### Process (deterministic)
@@ -146,13 +264,13 @@ For each query:
   - execution status (`ok`, `empty`, `timeout`, `parse_error`, `auth`, etc.)
   - timestamp
   - optional first result row
-- Keep queries that parse and execute (`ok` or `empty`).
+- Store latest run and latest successful run in the same record.
 
 ### Output
 
-`runnable_queries.jsonl`
+`run_queries.jsonl` (query records with run metadata)
 
-This step establishes **ground-truth executability**.
+This step establishes **ground-truth executability** for each query record.
 
 ---
 
@@ -162,7 +280,7 @@ This step establishes **ground-truth executability**.
 
 ### Inputs
 
-- `runnable_queries.jsonl`
+- `run_queries.jsonl`
 - KG descriptions from `kgs.jsonl`
 - optional sample result rows
 

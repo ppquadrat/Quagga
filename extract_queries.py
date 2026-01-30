@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 """
-Extract SPARQL queries from Git repositories listed in `seeds.yaml`.:
+Extract SPARQL queries from Git repositories listed in `seeds.yaml`:
 1) Read `seeds.yaml` for KG IDs and repo URLs.
 2) Clone repos into `repos/` if missing, and record current commit hash.
 3) Walk repo files and extract queries from `.rq`, `.sparql`, and fenced
    ```sparql blocks in Markdown.
 4) Normalize queries, keep only SELECT queries, and deduplicate by sha256.
-5) Write `raw_queries.jsonl` (one JSON object per query).
+5) Write `kg_queries.jsonl` (one JSON object per query, with provenance).
 """
 
 import hashlib
@@ -16,6 +16,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import urlparse
@@ -216,17 +217,52 @@ def resolve_repo_url(repo_url: str) -> str:
     return repo_url if parsed.scheme else f"https://{repo_url}"
 
 
+def build_query_record(
+    kg_id: str,
+    query_type: str,
+    raw_query: str,
+    clean_query: str,
+    raw_hash: str,
+    clean_hash: str,
+) -> Dict[str, object]:
+    return {
+        "query_id": f"{kg_id}__{clean_hash}",
+        "kg_id": kg_id,
+        "query_type": query_type,
+        "sparql_raw": raw_query,
+        "sparql_clean": clean_query,
+        "sparql_hash": clean_hash,
+        "raw_hash": raw_hash,
+        "evidence": [],
+        "cq_items": [],
+        "nl_question": {
+            "text": None,
+            "source": None,
+            "generated_at": None,
+            "generator": None,
+        },
+        "justification": None,
+        "comments": None,
+        "verification": {"status": "unverified", "notes": None},
+        "latest_run": None,
+        "latest_successful_run": None,
+        "run_history": [],
+    }
+
+
 def main() -> None:
     seeds_path = Path("seeds.yaml")
-    out_path = Path("raw_queries.jsonl")
+    out_path = Path("kg_queries.jsonl")
     repos_dir = Path("repos")
     repos_dir.mkdir(parents=True, exist_ok=True)
 
     raw_kgs = load_seeds(seeds_path)
     kgs = [parse_kg_seed(r) for r in raw_kgs]
 
-    records: List[Dict[str, str]] = []
-    seen_hashes: set[str] = set()
+    records: List[Dict[str, object]] = []
+    record_by_key: Dict[tuple[str, str], Dict[str, object]] = {}
+    label_counters: Dict[str, int] = {}
+    extracted_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     for kg in kgs:
         for repo_url in kg.repos:
@@ -245,19 +281,33 @@ def main() -> None:
                         continue
                     if not is_select_query(normalized):
                         continue
-                    digest = sha256_hash(normalized)
-                    if digest in seen_hashes:
-                        continue
-                    seen_hashes.add(digest)
-                    records.append(
+                    clean_hash = sha256_hash(normalized)
+                    raw_hash = sha256_hash(item["query"])
+                    key = (kg.kg_id, clean_hash)
+                    if key not in record_by_key:
+                        label_counters[kg.kg_id] = label_counters.get(kg.kg_id, 0) + 1
+                        query_label = f"{kg.kg_id}-{label_counters[kg.kg_id]:04d}"
+                        record_by_key[key] = build_query_record(
+                            kg_id=kg.kg_id,
+                            query_type="select",
+                            raw_query=item["query"],
+                            clean_query=normalized,
+                            raw_hash=raw_hash,
+                            clean_hash=clean_hash,
+                        )
+                        record_by_key[key]["query_label"] = query_label
+                        records.append(record_by_key[key])
+                    record = record_by_key[key]
+                    record["evidence"].append(
                         {
-                            "kg_id": kg.kg_id,
-                            "source_type": item["source_type"],
-                            "repo_url": repo_url,
+                            "evidence_id": f"e{len(record['evidence']) + 1}",
+                            "type": item["source_type"],
+                            "source_url": repo_url,
+                            "source_path": rel_path,
                             "repo_commit": repo_commit,
-                            "path": rel_path,
-                            "query": normalized,
-                            "hash": digest,
+                            "snippet": item["query"].strip(),
+                            "extracted_at": extracted_at,
+                            "extractor_version": "extract_queries.py@v1",
                         }
                     )
 
