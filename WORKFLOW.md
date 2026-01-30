@@ -246,6 +246,31 @@ No filtering and no LLM use at this stage.
 
 ---
 
+## 3.5. Evidence enrichment (`kg_queries.jsonl`)
+
+**Goal:** enrich query records with human-readable evidence from sources.
+
+### Inputs
+
+- `kg_queries.jsonl`
+- repositories listed in `seeds.yaml`
+- documentation pages (optional)
+- academic papers (optional)
+
+### Process (deterministic)
+
+- For repo files:
+  - Extract leading comment blocks in `.rq`/`.sparql` files.
+  - For Markdown files, pair each fenced `sparql` block with the nearest
+    preceding paragraph as a description.
+- Store extracted text as `evidence` items linked to the query record.
+
+### Output
+
+`kg_queries.jsonl` (updated in-place with evidence items)
+
+---
+
 ## 4. Query execution and filtering (`run_queries.jsonl`)
 
 **Goal:** keep only queries that actually run.

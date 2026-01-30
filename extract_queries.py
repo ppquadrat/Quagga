@@ -187,7 +187,7 @@ def sha256_hash(text: str) -> str:
 
 
 def extract_queries_from_md(text: str) -> List[str]:
-    pattern = re.compile(r"```sparql\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+    pattern = re.compile(r"```sparql\\s*(.*?)```", re.DOTALL | re.IGNORECASE)
     return [m.group(1) for m in pattern.finditer(text)]
 
 
