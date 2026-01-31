@@ -12,6 +12,7 @@ Extract SPARQL queries from Git repositories listed in `seeds.yaml`:
 """
 
 import hashlib
+import html
 import json
 import re
 import subprocess
@@ -191,6 +192,11 @@ def extract_queries_from_md(text: str) -> List[str]:
     return [m.group(1) for m in pattern.finditer(text)]
 
 
+def extract_queries_from_pre(text: str) -> List[str]:
+    pattern = re.compile(r"<pre>(.*?)</pre>", re.DOTALL | re.IGNORECASE)
+    return [html.unescape(m.group(1)) for m in pattern.finditer(text)]
+
+
 def extract_queries_from_file(path: Path) -> List[Dict[str, str]]:
     suffix = path.suffix.lower()
     try:
@@ -208,6 +214,9 @@ def extract_queries_from_file(path: Path) -> List[Dict[str, str]]:
         for block in extract_queries_from_md(text):
             for q in split_queries(block):
                 queries.append({"source_type": "md_fence", "query": q})
+        for block in extract_queries_from_pre(text):
+            for q in split_queries(block):
+                queries.append({"source_type": "md_pre", "query": q})
         return queries
     return []
 
@@ -219,6 +228,7 @@ def resolve_repo_url(repo_url: str) -> str:
 
 def build_query_record(
     kg_id: str,
+    query_label: str,
     query_type: str,
     raw_query: str,
     clean_query: str,
@@ -226,6 +236,7 @@ def build_query_record(
     clean_hash: str,
 ) -> Dict[str, object]:
     return {
+        "query_label": query_label,
         "query_id": f"{kg_id}__{clean_hash}",
         "kg_id": kg_id,
         "query_type": query_type,
@@ -289,13 +300,13 @@ def main() -> None:
                         query_label = f"{kg.kg_id}-{label_counters[kg.kg_id]:04d}"
                         record_by_key[key] = build_query_record(
                             kg_id=kg.kg_id,
+                            query_label=query_label,
                             query_type="select",
                             raw_query=item["query"],
                             clean_query=normalized,
                             raw_hash=raw_hash,
                             clean_hash=clean_hash,
                         )
-                        record_by_key[key]["query_label"] = query_label
                         records.append(record_by_key[key])
                     record = record_by_key[key]
                     record["evidence"].append(

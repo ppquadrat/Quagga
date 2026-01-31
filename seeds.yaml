@@ -10,6 +10,8 @@
       auth: none
     repos:
       - https://github.com/polifonia-project/organs-knowledge-graph
+    docs:
+      - https://github.com/polifonia-project/organs-ontology/blob/main/README.md
     priority: high
     notes: >
       Already partially curated manually. Use as baseline for automation tests.

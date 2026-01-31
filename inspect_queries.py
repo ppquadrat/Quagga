@@ -27,12 +27,31 @@ def main() -> None:
             except json.JSONDecodeError:
                 continue
 
+    def format_sparql(text: str) -> str:
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        formatted: List[str] = []
+        indent = 0
+        for line in lines:
+            lowered = line.lower()
+            if lowered.startswith("}"):
+                indent = max(indent - 1, 0)
+            formatted.append("  " * indent + line)
+            if line.endswith("{"):
+                indent += 1
+        return "\n".join(formatted)
+
     with out.open("w", encoding="utf-8") as w:
         for i, rec in enumerate(data, 1):
             kg_id = rec.get("kg_id", "")
             query_id = rec.get("query_id", "")
-            w.write(f"=== {i} | {kg_id} | {query_id} ===\n")
-            w.write(str(rec.get("sparql_clean", "")).strip() + "\n\n")
+            query_label = rec.get("query_label", "")
+            w.write(f"=== {i} | {kg_id} | {query_label} | {query_id} ===\n")
+            w.write(json.dumps(rec, ensure_ascii=False, indent=2))
+            sparql = rec.get("sparql_clean")
+            if isinstance(sparql, str) and sparql.strip():
+                w.write("\n\nSPARQL (formatted)\n")
+                w.write(format_sparql(sparql) + "\n")
+            w.write("\n\n")
 
     print(f"Wrote {out.resolve()}")
 
