@@ -244,7 +244,12 @@ def fetch_sources_for_kg(kg: KGSeed) -> List[Dict[str, Any]]:
             sources.append(fetch_url_text(repo_url))
 
     for doc_url in (kg.docs or []):
-        sources.append(fetch_url_text(doc_url))
+        normalized = doc_url
+        if "github.com/" in doc_url and "/blob/" in doc_url:
+            # Convert GitHub blob URLs to raw content.
+            parts = doc_url.split("github.com/", 1)[-1]
+            normalized = "https://raw.githubusercontent.com/" + parts.replace("/blob/", "/")
+        sources.append(fetch_url_text(normalized))
 
     return sources
 

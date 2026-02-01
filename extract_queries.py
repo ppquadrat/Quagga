@@ -46,6 +46,24 @@ def load_seeds(path: Path) -> List[Dict[str, object]]:
     return kgs
 
 
+def load_kgs_jsonl(path: Path) -> List[Dict[str, object]]:
+    if not path.exists():
+        return []
+    records: List[Dict[str, object]] = []
+    text = path.read_text(encoding="utf-8-sig")
+    if text.lstrip().startswith("["):
+        data = json.loads(text)
+        if isinstance(data, list):
+            return data
+        return []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        records.append(json.loads(line))
+    return records
+
+
 def parse_kg_seed(raw: Dict[str, object]) -> KGSeed:
     kg_id = raw.get("kg_id")
     if not isinstance(kg_id, str) or not kg_id.strip():
@@ -188,13 +206,93 @@ def sha256_hash(text: str) -> str:
 
 
 def extract_queries_from_md(text: str) -> List[str]:
-    pattern = re.compile(r"```sparql\\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+    # Capture fenced blocks with or without language tag; SPARQL will be filtered later.
+    pattern = re.compile(r"```(?:sparql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
     return [m.group(1) for m in pattern.finditer(text)]
 
 
 def extract_queries_from_pre(text: str) -> List[str]:
-    pattern = re.compile(r"<pre>(.*?)</pre>", re.DOTALL | re.IGNORECASE)
+    pattern = re.compile(r"<pre[^>]*>(.*?)</pre>", re.DOTALL | re.IGNORECASE)
     return [html.unescape(m.group(1)) for m in pattern.finditer(text)]
+
+
+def parse_source_file(path: Path) -> Dict[str, str]:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    if text.startswith("SOURCE:"):
+        parts = text.split("\n\n", 1)
+        header = parts[0].strip()
+        body = parts[1] if len(parts) > 1 else ""
+        url = header.replace("SOURCE:", "").strip()
+        return {"url": url, "text": normalize_source_text(body), "raw": body}
+    return {"url": "", "text": normalize_source_text(text), "raw": text}
+
+
+def normalize_source_text(text: str) -> str:
+    if "<html" in text.lower() or "markdown-body" in text.lower():
+        return html_to_markdownish(text)
+    return text
+
+
+def html_to_markdownish(text: str) -> str:
+    def extract_markdown_div(html_text: str) -> str:
+        start_match = re.search(
+            r'<div[^>]*class="[^"]*markdown-body[^"]*"[^>]*>',
+            html_text,
+            re.IGNORECASE,
+        )
+        if not start_match:
+            return ""
+        start_idx = start_match.end()
+        depth = 1
+        idx = start_idx
+        div_open = re.compile(r"<div[^>]*>", re.IGNORECASE)
+        div_close = re.compile(r"</div>", re.IGNORECASE)
+        while idx < len(html_text):
+            next_open = div_open.search(html_text, idx)
+            next_close = div_close.search(html_text, idx)
+            if not next_close:
+                break
+            if next_open and next_open.start() < next_close.start():
+                depth += 1
+                idx = next_open.end()
+            else:
+                depth -= 1
+                idx = next_close.end()
+                if depth == 0:
+                    return html_text[start_idx:next_close.start()]
+        return ""
+
+    match = re.search(r'<article class="markdown-body[^"]*">(.*?)</article>', text, re.DOTALL | re.IGNORECASE)
+    if match:
+        body = match.group(1)
+    else:
+        match = re.search(r'<article[^>]*itemprop="text"[^>]*>(.*?)</article>', text, re.DOTALL | re.IGNORECASE)
+        if match:
+            body = match.group(1)
+        else:
+            md_div = extract_markdown_div(text)
+            if md_div:
+                body = md_div
+            else:
+                match = re.search(r'<div[^>]*id="readme"[^>]*>(.*?)</div>', text, re.DOTALL | re.IGNORECASE)
+                body = match.group(1) if match else text
+
+    body = re.sub(r"<script[^>]*>.*?</script>", "", body, flags=re.DOTALL | re.IGNORECASE)
+    body = re.sub(r"<style[^>]*>.*?</style>", "", body, flags=re.DOTALL | re.IGNORECASE)
+    body = re.sub(r"<pre[^>]*><code[^>]*>", "```\n", body, flags=re.DOTALL | re.IGNORECASE)
+    body = re.sub(r"</code></pre>", "\n```", body, flags=re.DOTALL | re.IGNORECASE)
+    body = re.sub(r"<br\\s*/?>", "\n", body, flags=re.IGNORECASE)
+    body = re.sub(r"</p>", "\n\n", body, flags=re.IGNORECASE)
+    body = re.sub(r"<p[^>]*>", "", body, flags=re.IGNORECASE)
+
+    for level in range(6, 0, -1):
+        pattern = re.compile(rf"<h{level}[^>]*>(.*?)</h{level}>", re.DOTALL | re.IGNORECASE)
+        body = pattern.sub(lambda m: "\n" + ("#" * level) + " " + re.sub(r"<[^>]+>", "", m.group(1)).strip() + "\n", body)
+
+    body = re.sub(r"<li[^>]*>(.*?)</li>", lambda m: "- " + re.sub(r"<[^>]+>", "", m.group(1)).strip() + "\n", body, flags=re.DOTALL | re.IGNORECASE)
+    body = re.sub(r"<[^>]+>", "", body)
+    body = html.unescape(body)
+    return body
 
 
 def extract_queries_from_file(path: Path) -> List[Dict[str, str]]:
@@ -266,6 +364,7 @@ def main() -> None:
     out_path = Path("kg_queries.jsonl")
     repos_dir = Path("repos")
     repos_dir.mkdir(parents=True, exist_ok=True)
+    kgs_path = Path("kgs.jsonl")
 
     raw_kgs = load_seeds(seeds_path)
     kgs = [parse_kg_seed(r) for r in raw_kgs]
@@ -274,6 +373,21 @@ def main() -> None:
     record_by_key: Dict[tuple[str, str], Dict[str, object]] = {}
     label_counters: Dict[str, int] = {}
     extracted_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    kg_sources: Dict[str, List[str]] = {}
+    if kgs_path.exists():
+        for kg in load_kgs_jsonl(kgs_path):
+            kg_id = kg.get("kg_id")
+            source_files = kg.get("source_files")
+            if isinstance(kg_id, str) and isinstance(source_files, list):
+                filtered = []
+                for s in source_files:
+                    if not isinstance(s, str):
+                        continue
+                    # Skip README snapshots pulled from GitHub API to avoid duplicates.
+                    if "api-github-com" in s:
+                        continue
+                    filtered.append(s)
+                kg_sources[kg_id] = filtered
 
     for kg in kgs:
         for repo_url in kg.repos:
@@ -317,6 +431,61 @@ def main() -> None:
                             "source_path": rel_path,
                             "repo_commit": repo_commit,
                             "snippet": item["query"].strip(),
+                            "extracted_at": extracted_at,
+                            "extractor_version": "extract_queries.py@v1",
+                        }
+                    )
+
+        for src_file in kg_sources.get(kg.kg_id, []):
+            src_path = Path(src_file)
+            if not src_path.is_absolute():
+                if src_path.parts and src_path.parts[0] == "kg_sources":
+                    src_path = src_path
+                else:
+                    src_path = Path("kg_sources") / src_path
+            if not src_path.exists():
+                continue
+            parsed = parse_source_file(src_path)
+            body = parsed["text"]
+            raw_body = parsed["raw"]
+            source_url = parsed["url"]
+            if not body.strip():
+                continue
+            blocks = extract_queries_from_md(body)
+            if "<pre" in raw_body.lower():
+                blocks += extract_queries_from_pre(raw_body)
+            for block in blocks:
+                for q in split_queries(block):
+                    normalized = normalize_query(q)
+                    if not normalized:
+                        continue
+                    if not is_select_query(normalized):
+                        continue
+                    clean_hash = sha256_hash(normalized)
+                    raw_hash = sha256_hash(q)
+                    key = (kg.kg_id, clean_hash)
+                    if key not in record_by_key:
+                        label_counters[kg.kg_id] = label_counters.get(kg.kg_id, 0) + 1
+                        query_label = f"{kg.kg_id}-{label_counters[kg.kg_id]:04d}"
+                        record_by_key[key] = build_query_record(
+                            kg_id=kg.kg_id,
+                            query_label=query_label,
+                            query_type="select",
+                            raw_query=q,
+                            clean_query=normalized,
+                            raw_hash=raw_hash,
+                            clean_hash=clean_hash,
+                        )
+                        records.append(record_by_key[key])
+                    record = record_by_key[key]
+                    record["evidence"].append(
+                        {
+                            "evidence_id": f"e{len(record['evidence']) + 1}",
+                            "type": "doc_pre" if "<pre" in raw_body.lower() else "doc_fence",
+                            "source_url": source_url,
+                            "source_path": str(src_path),
+                            "repo_commit": "",
+                            "snippet": q.strip(),
                             "extracted_at": extracted_at,
                             "extractor_version": "extract_queries.py@v1",
                         }
