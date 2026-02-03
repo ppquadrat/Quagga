@@ -217,6 +217,11 @@ def extract_queries_from_pre(text: str) -> List[str]:
     return [html.unescape(m.group(1)) for m in pattern.finditer(text)]
 
 
+def extract_queries_from_py(text: str) -> List[str]:
+    pattern = re.compile(r"(['\"]{3})(.*?)\1", re.DOTALL)
+    return [m.group(2) for m in pattern.finditer(text)]
+
+
 def extract_text_from_pdf(path: Path) -> str:
     try:
         reader = PdfReader(str(path))
@@ -229,6 +234,85 @@ def extract_text_from_pdf(path: Path) -> str:
         except Exception:
             continue
     return "\n".join(parts)
+
+
+def extract_queries_from_pdf_text(text: str) -> List[str]:
+    lines = text.splitlines()
+    blocks: List[str] = []
+    current: List[str] = []
+    in_block = False
+    depth = 0
+    seen_query = False
+    for line in lines:
+        stripped = line.strip()
+        is_code_line = bool(
+            re.search(r"\b(select|construct|ask|describe|where|prefix)\b", stripped, re.IGNORECASE)
+            or "{ " in stripped
+            or stripped.startswith("{")
+            or stripped.startswith("PREFIX")
+        )
+        if is_code_line:
+            if not in_block:
+                in_block = True
+                current = []
+                depth = 0
+                seen_query = False
+            current.append(line.rstrip())
+            if re.search(r"\b(select|construct|ask|describe)\b", stripped, re.IGNORECASE):
+                seen_query = True
+            depth += line.count("{") - line.count("}")
+            continue
+        if in_block:
+            # Keep collecting until braces close after a query start.
+            depth += line.count("{") - line.count("}")
+            current.append(line.rstrip())
+            if seen_query and depth <= 0:
+                if current:
+                    blocks.append("\n".join(current).strip())
+                current = []
+                in_block = False
+                depth = 0
+                seen_query = False
+                continue
+    if in_block and current:
+        blocks.append("\n".join(current).strip())
+    # Repair broken PREFIX lines split across PDF line breaks.
+    fixed_blocks: List[str] = []
+    for block in blocks:
+        lines = block.splitlines()
+        merged: List[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].rstrip()
+            if (
+                line.strip().lower().startswith("prefix")
+                and i + 1 < len(lines)
+                and lines[i + 1].strip().startswith("<")
+            ):
+                line = f"{line} {lines[i + 1].strip()}"
+                i += 2
+                merged.append(line)
+                continue
+            if line.strip().endswith(":") and i + 1 < len(lines) and lines[i + 1].strip().startswith("<"):
+                line = f"{line} {lines[i + 1].strip()}"
+                i += 2
+                merged.append(line)
+                continue
+            if "<" in line and ">" not in line and i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                if next_line and not re.match(r"^\s*(prefix|select|construct|ask|describe)\b", next_line, re.IGNORECASE):
+                    line = f"{line}{next_line}"
+                    i += 2
+                    merged.append(line)
+                    continue
+            merged.append(line)
+            i += 1
+        fixed_blocks.append("\n".join(merged).strip())
+    queries: List[str] = []
+    for block in fixed_blocks:
+        for q in split_queries(block):
+            queries.append(q)
+    return queries
 
 
 def parse_source_file(path: Path) -> Dict[str, str]:
@@ -331,6 +415,12 @@ def extract_queries_from_file(path: Path) -> List[Dict[str, str]]:
             for q in split_queries(block):
                 queries.append({"source_type": "md_pre", "query": q})
         return queries
+    if suffix == ".py":
+        queries = []
+        for block in extract_queries_from_py(text):
+            for q in split_queries(block):
+                queries.append({"source_type": "repo_file", "query": q})
+        return queries
     return []
 
 
@@ -394,6 +484,7 @@ def main() -> None:
         for kg in load_kgs_jsonl(kgs_path):
             kg_id = kg.get("kg_id")
             source_files = kg.get("source_files")
+            docs = kg.get("docs")
             if isinstance(kg_id, str) and isinstance(source_files, list):
                 filtered = []
                 for s in source_files:
@@ -404,6 +495,13 @@ def main() -> None:
                         continue
                     filtered.append(s)
                 kg_sources[kg_id] = filtered
+            if isinstance(kg_id, str) and isinstance(docs, list):
+                for doc in docs:
+                    if not isinstance(doc, str):
+                        continue
+                    doc_path = Path(doc)
+                    if doc_path.exists():
+                        kg_sources.setdefault(kg_id, []).append(str(doc_path))
 
     for kg in kgs:
         for repo_url in kg.repos:
@@ -452,49 +550,59 @@ def main() -> None:
                         }
                     )
 
-        # Extract from local PDFs, keyed by filename match on kg_id.
+        # Extract from local PDFs, keyed by filename match on kg_id or explicit doc paths.
+        pdf_paths: List[Path] = []
         if pdfs_dir.exists():
-            for pdf_path in pdfs_dir.glob("*.pdf"):
-                if kg.kg_id.lower() not in pdf_path.name.lower():
+            pdf_paths.extend(pdfs_dir.glob("*.pdf"))
+        for doc_path in kg_sources.get(kg.kg_id, []):
+            path_obj = Path(doc_path)
+            if path_obj.suffix.lower() == ".pdf" and path_obj.exists():
+                pdf_paths.append(path_obj)
+        seen_pdfs: set[Path] = set()
+        for pdf_path in pdf_paths:
+            if pdf_path in seen_pdfs:
+                continue
+            seen_pdfs.add(pdf_path)
+            if kg.kg_id.lower() not in pdf_path.name.lower() and str(pdf_path) not in kg_sources.get(kg.kg_id, []):
+                continue
+            pdf_text = extract_text_from_pdf(pdf_path)
+            if not pdf_text.strip():
+                continue
+            for q in extract_queries_from_pdf_text(pdf_text):
+                normalized = normalize_query(q)
+                if not normalized:
                     continue
-                pdf_text = extract_text_from_pdf(pdf_path)
-                if not pdf_text.strip():
+                if not is_select_query(normalized):
                     continue
-                for q in split_queries(pdf_text):
-                    normalized = normalize_query(q)
-                    if not normalized:
-                        continue
-                    if not is_select_query(normalized):
-                        continue
-                    clean_hash = sha256_hash(normalized)
-                    raw_hash = sha256_hash(q)
-                    key = (kg.kg_id, clean_hash)
-                    if key not in record_by_key:
-                        label_counters[kg.kg_id] = label_counters.get(kg.kg_id, 0) + 1
-                        query_label = f"{kg.kg_id}-{label_counters[kg.kg_id]:04d}"
-                        record_by_key[key] = build_query_record(
-                            kg_id=kg.kg_id,
-                            query_label=query_label,
-                            query_type="select",
-                            raw_query=q,
-                            clean_query=normalized,
-                            raw_hash=raw_hash,
-                            clean_hash=clean_hash,
-                        )
-                        records.append(record_by_key[key])
-                    record = record_by_key[key]
-                    record["evidence"].append(
-                        {
-                            "evidence_id": f"e{len(record['evidence']) + 1}",
-                            "type": "doc_pdf",
-                            "source_url": "",
-                            "source_path": str(pdf_path),
-                            "repo_commit": "",
-                            "snippet": q.strip(),
-                            "extracted_at": extracted_at,
-                            "extractor_version": "extract_queries.py@v1",
-                        }
+                clean_hash = sha256_hash(normalized)
+                raw_hash = sha256_hash(q)
+                key = (kg.kg_id, clean_hash)
+                if key not in record_by_key:
+                    label_counters[kg.kg_id] = label_counters.get(kg.kg_id, 0) + 1
+                    query_label = f"{kg.kg_id}-{label_counters[kg.kg_id]:04d}"
+                    record_by_key[key] = build_query_record(
+                        kg_id=kg.kg_id,
+                        query_label=query_label,
+                        query_type="select",
+                        raw_query=q,
+                        clean_query=normalized,
+                        raw_hash=raw_hash,
+                        clean_hash=clean_hash,
                     )
+                    records.append(record_by_key[key])
+                record = record_by_key[key]
+                record["evidence"].append(
+                    {
+                        "evidence_id": f"e{len(record['evidence']) + 1}",
+                        "type": "doc_pdf",
+                        "source_url": "",
+                        "source_path": str(pdf_path),
+                        "repo_commit": "",
+                        "snippet": q.strip(),
+                        "extracted_at": extracted_at,
+                        "extractor_version": "extract_queries.py@v1",
+                    }
+                )
 
         for src_file in kg_sources.get(kg.kg_id, []):
             src_path = Path(src_file)

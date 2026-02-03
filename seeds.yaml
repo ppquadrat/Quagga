@@ -29,6 +29,8 @@
       - https://github.com/polifonia-project/meetups-knowledge-graph
     docs:
       - https://polifonia.kmi.open.ac.uk/meetups/queries.php
+      - pdfs/2023_SEMMES_Meetups-CR.pdf
+      - pdfs/Meetups_ESWC.pdf
     priority: high
     notes: >
       Provides a page of example SPARQL queries – ideal for bootstrapping pairs.
@@ -74,3 +76,18 @@
     priority: medium
     notes: >
       Repo contains SPARQL examples embedded in documentation rather than .rq files.
+
+  - kg_id: jazzontology
+    name: Jazz Ontology (Dig That Lick)
+    project: Dig That Lick
+    description_hint: >
+      Ontology and RDF datasets for jazz metadata, performances, sessions,
+      recordings, and related discographic information.
+    repos:
+      - https://github.com/ppquadrat/DigThatLick
+    docs:
+      - pdfs/Jazz Ontology supplement.pdf
+      - https://www.sciencedirect.com/science/article/pii/S1570826822000245
+    priority: medium
+    notes: >
+      RDF data dump (TTL) referenced at https://osf.io/bwg42/files/qnb4k.
