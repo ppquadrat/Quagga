@@ -23,6 +23,7 @@ from typing import Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
 import yaml
+from pypdf import PdfReader
 
 
 @dataclass
@@ -216,6 +217,20 @@ def extract_queries_from_pre(text: str) -> List[str]:
     return [html.unescape(m.group(1)) for m in pattern.finditer(text)]
 
 
+def extract_text_from_pdf(path: Path) -> str:
+    try:
+        reader = PdfReader(str(path))
+    except Exception:
+        return ""
+    parts: List[str] = []
+    for page in reader.pages:
+        try:
+            parts.append(page.extract_text() or "")
+        except Exception:
+            continue
+    return "\n".join(parts)
+
+
 def parse_source_file(path: Path) -> Dict[str, str]:
     text = path.read_text(encoding="utf-8", errors="ignore")
     if text.startswith("SOURCE:"):
@@ -365,6 +380,7 @@ def main() -> None:
     repos_dir = Path("repos")
     repos_dir.mkdir(parents=True, exist_ok=True)
     kgs_path = Path("kgs.jsonl")
+    pdfs_dir = Path("pdfs")
 
     raw_kgs = load_seeds(seeds_path)
     kgs = [parse_kg_seed(r) for r in raw_kgs]
@@ -431,6 +447,50 @@ def main() -> None:
                             "source_path": rel_path,
                             "repo_commit": repo_commit,
                             "snippet": item["query"].strip(),
+                            "extracted_at": extracted_at,
+                            "extractor_version": "extract_queries.py@v1",
+                        }
+                    )
+
+        # Extract from local PDFs, keyed by filename match on kg_id.
+        if pdfs_dir.exists():
+            for pdf_path in pdfs_dir.glob("*.pdf"):
+                if kg.kg_id.lower() not in pdf_path.name.lower():
+                    continue
+                pdf_text = extract_text_from_pdf(pdf_path)
+                if not pdf_text.strip():
+                    continue
+                for q in split_queries(pdf_text):
+                    normalized = normalize_query(q)
+                    if not normalized:
+                        continue
+                    if not is_select_query(normalized):
+                        continue
+                    clean_hash = sha256_hash(normalized)
+                    raw_hash = sha256_hash(q)
+                    key = (kg.kg_id, clean_hash)
+                    if key not in record_by_key:
+                        label_counters[kg.kg_id] = label_counters.get(kg.kg_id, 0) + 1
+                        query_label = f"{kg.kg_id}-{label_counters[kg.kg_id]:04d}"
+                        record_by_key[key] = build_query_record(
+                            kg_id=kg.kg_id,
+                            query_label=query_label,
+                            query_type="select",
+                            raw_query=q,
+                            clean_query=normalized,
+                            raw_hash=raw_hash,
+                            clean_hash=clean_hash,
+                        )
+                        records.append(record_by_key[key])
+                    record = record_by_key[key]
+                    record["evidence"].append(
+                        {
+                            "evidence_id": f"e{len(record['evidence']) + 1}",
+                            "type": "doc_pdf",
+                            "source_url": "",
+                            "source_path": str(pdf_path),
+                            "repo_commit": "",
+                            "snippet": q.strip(),
                             "extracted_at": extracted_at,
                             "extractor_version": "extract_queries.py@v1",
                         }

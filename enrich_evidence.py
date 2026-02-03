@@ -8,6 +8,7 @@ import html
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
+from pypdf import PdfReader
 
 
 def load_query_records(path: Path) -> List[Dict[str, object]]:
@@ -152,7 +153,7 @@ def extract_recent_text_blocks(prefix: str, limit: int = 2) -> str:
 
 
 def extract_md_blocks_with_desc(text: str) -> List[Dict[str, object]]:
-    pattern = re.compile(r"```sparql\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+    pattern = re.compile(r"```(?:sparql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
     results: List[Dict[str, str]] = []
     matches = list(pattern.finditer(text))
     for match in matches:
@@ -290,6 +291,197 @@ def parse_source_file(path: Path) -> Tuple[str, str, str]:
         url = header.replace("SOURCE:", "").strip()
         return url, normalize_source_text(body), body
     return "", normalize_source_text(text), text
+
+
+def extract_text_from_pdf(path: Path) -> str:
+    try:
+        reader = PdfReader(str(path))
+    except Exception:
+        return ""
+    parts: List[str] = []
+    for page in reader.pages:
+        try:
+            parts.append(page.extract_text() or "")
+        except Exception:
+            continue
+    return "\n".join(parts)
+
+
+def extract_pdf_captions(text: str) -> List[str]:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    captions: List[str] = []
+    caption_re = re.compile(r"^(figure|fig\.?|table|tab\.)\s*\d+", re.IGNORECASE)
+    for i, line in enumerate(lines):
+        if not caption_re.match(line):
+            continue
+        # Heuristic: caption lines are short and often end with '.' or ':'.
+        if len(line.split()) < 3:
+            continue
+        # Capture this line plus up to 2 following lines unless they look like body text.
+        collected = [line]
+        for j in range(i + 1, min(i + 4, len(lines))):
+            nxt = lines[j]
+            if caption_re.match(nxt):
+                break
+            if len(nxt.split()) > 30:
+                break
+            collected.append(nxt)
+        captions.append(" ".join(collected).strip())
+    return captions
+
+
+def extract_pdf_cq_captions(text: str) -> List[str]:
+    # Capture captions even if line breaks split them.
+    candidates: List[str] = []
+    pattern = re.compile(
+        r"(table\s*\d+\s*[:\-]?[\s\S]{0,80}competency\s+questions[^\n]{0,80})",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(text):
+        snippet = " ".join(match.group(1).split())
+        candidates.append(snippet)
+    return candidates
+
+
+def extract_pdf_tables_for_captions(text: str, captions: List[str]) -> List[str]:
+    if not text.strip() or not captions:
+        return []
+    lines = text.splitlines()
+    line_count = len(lines)
+    if line_count == 0:
+        return []
+    caption_set = {cap.strip() for cap in captions if cap.strip()}
+    if not caption_set:
+        return []
+    matchers: List[Tuple[str, str, Optional[str]]] = []
+    for cap in caption_set:
+        match = re.search(r"(table|figure)\s*(\d+)", cap, re.IGNORECASE)
+        if match:
+            matchers.append(("num", match.group(1).lower(), match.group(2)))
+        else:
+            matchers.append(("prefix", cap.lower()[:60], None))
+    if not matchers:
+        return []
+    blocks: List[str] = []
+    caption_re = re.compile(r"^\s*(table|figure)\s+\d+[:.]", re.IGNORECASE)
+    section_heading_re = re.compile(r"^\s*\d+(?:\.\d+)*\.\s+\w")
+    max_lines = 60
+    for idx, line in enumerate(lines):
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+        line_lower = line_stripped.lower()
+        matched = False
+        for kind, token, num in matchers:
+            if kind == "num":
+                if re.match(rf"^{re.escape(token)}\s*{re.escape(num)}\s*[:.]", line_lower):
+                    matched = True
+                    break
+            else:
+                if token and token in line_lower:
+                    matched = True
+                    break
+        if not matched:
+            continue
+        start = idx
+        collected: List[str] = []
+        blank_run = 0
+        row_count = 0
+        for j in range(start, min(line_count, start + max_lines)):
+            cur = lines[j].rstrip()
+            if not cur.strip():
+                blank_run += 1
+            else:
+                blank_run = 0
+            if j > start and caption_re.match(cur):
+                break
+            if j > start and section_heading_re.match(cur):
+                break
+            if j > start and row_count >= 4:
+                stripped = cur.strip()
+                if (
+                    len(stripped) > 80
+                    and stripped[:1].isalpha()
+                    and "." in stripped
+                ):
+                    break
+                if (
+                    stripped[:1].isalpha()
+                    and not re.search(r"\d", stripped)
+                    and len(stripped.split()) >= 6
+                ):
+                    break
+            if blank_run >= 2:
+                break
+            if cur.strip() and cur.lstrip()[:1].isdigit():
+                row_count += 1
+            collected.append(cur)
+        block = "\n".join(collected).strip()
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def extract_pdf_code_blocks(text: str) -> List[Dict[str, object]]:
+    if not text.strip():
+        return []
+    lines = text.splitlines()
+    blocks: List[Dict[str, object]] = []
+    in_block = False
+    current: List[str] = []
+    start_idx = 0
+    char_idx = 0
+    start_char = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        is_code_line = bool(
+            re.search(r"\b(select|construct|ask|describe|where|prefix)\b", stripped, re.IGNORECASE)
+            or "{ " in stripped
+            or stripped.startswith("{")
+            or stripped.startswith("PREFIX")
+        )
+        if is_code_line:
+            if not in_block:
+                in_block = True
+                start_idx = i
+                start_char = char_idx
+                current = []
+            current.append(line.rstrip())
+            char_idx += len(line) + 1
+            continue
+        if in_block:
+            if len(current) >= 3:
+                blocks.append({"start_idx": start_idx, "start_char": start_char, "block": "\n".join(current).strip()})
+            in_block = False
+            current = []
+        char_idx += len(line) + 1
+    if in_block and len(current) >= 3:
+        blocks.append({"start_idx": start_idx, "start_char": start_char, "block": "\n".join(current).strip()})
+    return blocks
+
+
+def extract_pdf_cq_bullets(text: str) -> List[str]:
+    lines = text.splitlines()
+    bullets: List[str] = []
+    header_re = re.compile(r"competency\\s+questions?", re.IGNORECASE)
+    bullet_re = re.compile(r"^\\s*(?:[-*•]|\\d+\\.)\\s+")
+    for i, line in enumerate(lines):
+        if not header_re.search(line):
+            continue
+        # Look ahead for bullet list items.
+        collected: List[str] = []
+        for j in range(i + 1, min(i + 30, len(lines))):
+            cur = lines[j].rstrip()
+            if bullet_re.match(cur):
+                collected.append(cur.strip())
+                continue
+            if collected and cur.strip() == "":
+                break
+            if collected and not bullet_re.match(cur):
+                break
+        if collected:
+            bullets.append("\n".join(collected).strip())
+    return bullets
 
 
 def normalize_source_text(text: str) -> str:
@@ -565,6 +757,20 @@ def query_has_repo_evidence(rec: Dict[str, object]) -> bool:
     return False
 
 
+def query_has_pdf_evidence(rec: Dict[str, object], pdf_path: Path) -> bool:
+    evidence = rec.get("evidence")
+    if not isinstance(evidence, list):
+        return False
+    for ev in evidence:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("source_path") != str(pdf_path):
+            continue
+        if ev.get("type") in {"doc_pre", "doc_fence", "doc_pdf"}:
+            return True
+    return False
+
+
 def query_has_doc_evidence(rec: Dict[str, object]) -> bool:
     for ev in rec.get("evidence", []) or []:
         if isinstance(ev, dict) and ev.get("type") in {"doc_pre", "doc_fence"}:
@@ -623,6 +829,7 @@ def main() -> None:
     queries_path = Path("kg_queries.jsonl")
     repos_dir = Path("repos")
     sources_dir = Path("kg_sources")
+    pdfs_dir = Path("pdfs")
     kgs_path = Path("kgs.jsonl")
 
     records = load_query_records(queries_path)
@@ -972,6 +1179,131 @@ def main() -> None:
                         clean_desc(cq_section),
                         extracted_at,
                     )
+
+        # Extract evidence from PDFs by filename match.
+        if pdfs_dir.exists():
+            for pdf_path in pdfs_dir.glob("*.pdf"):
+                if not isinstance(kg_id, str) or kg_id.lower() not in pdf_path.name.lower():
+                    continue
+                # Remove previous PDF-derived CQ evidence so we can replace it cleanly.
+                for rec2 in records:
+                    if rec2.get("kg_id") != kg_id:
+                        continue
+                    ev = rec2.get("evidence")
+                    if not isinstance(ev, list):
+                        continue
+                    rec2["evidence"] = [
+                        e for e in ev
+                        if not (
+                            isinstance(e, dict)
+                            and e.get("source_path") == str(pdf_path)
+                            and e.get("type") in {"doc_cq_section", "doc_query_desc"}
+                        )
+                    ]
+                pdf_text = extract_text_from_pdf(pdf_path)
+                if not pdf_text.strip():
+                    continue
+                captions = extract_pdf_captions(pdf_text) + extract_pdf_cq_captions(pdf_text)
+                caption_hits = []
+                for cap in captions:
+                    cap_lower = cap.lower()
+                    if "table" in cap_lower and re.search(r"competency\s+questions?", cap_lower):
+                        caption_hits.append(cap)
+                caption_hits = sorted(set(caption_hits))
+                cq_table_blocks = extract_pdf_tables_for_captions(pdf_text, caption_hits) if caption_hits else []
+                cq_bullets = extract_pdf_cq_bullets(pdf_text)
+                code_blocks = extract_pdf_code_blocks(pdf_text)
+                code_captions = [
+                    cap for cap in captions
+                    if re.search(r"\b(sparql|query|queries|algorithm)\b", cap.lower())
+                ]
+                # Only fall back to generic CQ extraction when no explicit CQ signal was found.
+                heading_blocks = [] if (caption_hits or cq_bullets) else extract_heading_bullets(pdf_text)
+                label_blocks = [] if (caption_hits or cq_bullets) else extract_label_blocks(pdf_text)
+                fallback_tables = [] if (caption_hits or cq_bullets) else extract_table_blocks(pdf_text)
+                cq_section = None if (caption_hits or cq_bullets) else extract_cq_section(pdf_text)
+                for rec2 in records:
+                    if rec2.get("kg_id") != kg_id:
+                        continue
+                    if not any(
+                        isinstance(e, dict) and e.get("source_path") == str(pdf_path)
+                        for e in rec2.get("evidence", []) or []
+                    ) and not query_has_repo_evidence(rec2):
+                        continue
+                    for tbl in cq_table_blocks:
+                        add_evidence(
+                            rec2,
+                            "doc_cq_section",
+                            "",
+                            str(pdf_path),
+                            "",
+                            tbl,
+                            extracted_at,
+                        )
+                    for bullet_block in cq_bullets:
+                        add_evidence(
+                            rec2,
+                            "doc_cq_section",
+                            "",
+                            str(pdf_path),
+                            "",
+                            clean_desc(bullet_block),
+                            extracted_at,
+                        )
+                    if query_has_pdf_evidence(rec2, pdf_path):
+                        for cap in code_captions:
+                            add_evidence(
+                                rec2,
+                                "doc_query_desc",
+                                "",
+                                str(pdf_path),
+                                "",
+                                clean_desc(cap),
+                                extracted_at,
+                            )
+                        for block in code_blocks:
+                            start_char = int(block.get("start_char", 0))
+                            context = extract_context_for_code(pdf_text, start_char)
+                            if context:
+                                add_evidence(
+                                    rec2,
+                                    "doc_query_desc",
+                                    "",
+                                    str(pdf_path),
+                                    "",
+                                    clean_desc(context),
+                                    extracted_at,
+                                )
+                    for block in heading_blocks + label_blocks:
+                        add_evidence(
+                            rec2,
+                            "doc_cq_section",
+                            "",
+                            str(pdf_path),
+                            "",
+                            clean_desc(block),
+                            extracted_at,
+                        )
+                    for tbl in fallback_tables:
+                        add_evidence(
+                            rec2,
+                            "doc_cq_section",
+                            "",
+                            str(pdf_path),
+                            "",
+                            tbl,
+                            extracted_at,
+                        )
+                    if cq_section:
+                        add_evidence(
+                            rec2,
+                            "doc_cq_section",
+                            "",
+                            str(pdf_path),
+                            "",
+                            clean_desc(cq_section),
+                            extracted_at,
+                        )
 
     after_counts: Dict[str, int] = {}
     type_counts: Dict[str, int] = {}
