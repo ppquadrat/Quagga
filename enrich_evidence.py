@@ -736,7 +736,7 @@ def html_to_markdownish(text: str) -> str:
     return body
 
 
-def extract_cq_section(text: str) -> Optional[str]:
+def extract_cq_section(text: str) -> List[str]:
     lines = text.splitlines()
     for idx, line in enumerate(lines):
         if "competency question" in line.lower() or line.strip().lower().startswith("cq"):
@@ -747,8 +747,53 @@ def extract_cq_section(text: str) -> Optional[str]:
                 if lines[j].strip().startswith("#") and j > idx:
                     break
             snippet = clean_md_text("\n".join(snippet_lines))
-            return snippet if snippet else None
-    return None
+            if not snippet:
+                return []
+            return extract_cq_items_from_text(snippet)
+    return []
+
+
+def extract_bullet_items(lines: List[str]) -> List[str]:
+    items: List[str] = []
+    current: List[str] = []
+    bullet_re = re.compile(r"^\s*[-*•]\s+(.*)")
+    for line in lines:
+        match = bullet_re.match(line)
+        if match:
+            if current:
+                items.append(" ".join(current).strip())
+                current = []
+            current.append(match.group(1).strip())
+            continue
+        if current and line.strip():
+            current.append(line.strip())
+            continue
+        if current:
+            items.append(" ".join(current).strip())
+            current = []
+    if current:
+        items.append(" ".join(current).strip())
+    return [item for item in items if item]
+
+
+def extract_cq_items_from_text(text: str) -> List[str]:
+    items: List[str] = []
+    label_items = extract_label_blocks(text)
+    if label_items:
+        items.extend(label_items)
+        return items
+    table_items = extract_table_blocks(text)
+    if table_items:
+        items.extend(table_items)
+        return items
+    bullet_items = extract_bullet_items(text.splitlines())
+    if bullet_items:
+        items.extend(bullet_items)
+        return items
+    for line in text.splitlines():
+        if "question" in line.lower() or line.strip().lower().startswith("cq"):
+            items.append(line.strip())
+    return [item for item in items if item]
 
 
 def extract_heading_bullets(text: str) -> List[str]:
@@ -766,11 +811,10 @@ def extract_heading_bullets(text: str) -> List[str]:
             while i < len(lines):
                 if heading_re.match(lines[i]):
                     break
-                if lines[i].strip().startswith(("-", "*")):
-                    block.append(lines[i].rstrip())
+                block.append(lines[i].rstrip())
                 i += 1
             if block:
-                results.append("\n".join(block).strip())
+                results.extend(extract_bullet_items(block))
         else:
             i += 1
     return results
@@ -814,25 +858,60 @@ def extract_table_blocks(text: str) -> List[str]:
                     if any(row):
                         rows.append(" | ".join([c for c in row if c]))
                     i += 1
-                if rows:
-                    blocks.append("\n".join(rows).strip())
+                for row in rows:
+                    if row.strip():
+                        blocks.append(row.strip())
                 continue
         i += 1
     return blocks
 
 
-def extract_cq_block(text: str) -> Optional[str]:
+def extract_cq_block(text: str) -> List[str]:
     pattern = re.compile(
         r"(#{1,6}\s+.*competency question.*?)(?=\n\s*#{1,6}\s+|\Z)",
         re.IGNORECASE | re.DOTALL,
     )
     match = pattern.search(text)
     if not match:
-        return None
+        return []
     block = match.group(1)
     lines = block.splitlines()[1:]
     cleaned = "\n".join([ln.rstrip() for ln in lines if ln.strip()]).strip()
-    return cleaned if cleaned else None
+    if not cleaned:
+        return []
+    return extract_cq_items_from_text(cleaned)
+
+
+def split_cq_block_items(block: str) -> List[str]:
+    lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+    if not lines:
+        return []
+    if any("|" in ln for ln in lines):
+        items: List[str] = []
+        for ln in lines:
+            if "|" not in ln:
+                continue
+            row = [c.strip() for c in ln.strip("|").split("|") if c.strip()]
+            if row:
+                items.append(" | ".join(row))
+        return [item for item in items if item]
+    label_re = re.compile(r"^(?:[A-Z]{2,3}\d+|CQ\d+|CT\d+|DR\d+|\d+)\b", re.IGNORECASE)
+    items: List[str] = []
+    current: List[str] = []
+    for ln in lines:
+        if label_re.match(ln):
+            if current:
+                items.append(" ".join(current).strip())
+                current = []
+            current.append(ln)
+            continue
+        if current:
+            current.append(ln)
+            continue
+        items.append(ln)
+    if current:
+        items.append(" ".join(current).strip())
+    return [item for item in items if item]
 
 
 def extract_context_for_code(text: str, start_idx: int) -> Optional[str]:
@@ -942,26 +1021,35 @@ def query_has_doc_evidence(rec: Dict[str, object]) -> bool:
     return False
 
 
-def select_llm_context(evidence: List[Dict[str, object]], origin: str) -> List[Dict[str, object]]:
-    def pick_by_types(types: List[str], limit: int) -> List[Dict[str, object]]:
-        picked: List[Dict[str, object]] = []
-        for ev in evidence:
-            if ev.get("type") in types and ev.get("snippet"):
-                picked.append(ev)
-                if len(picked) >= limit:
-                    break
-        return picked
+def rank_llm_context(evidence: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    priority_groups = [
+        {"query_comment"},
+        {"doc_query_desc", "web_query_desc", "readme_query_desc"},
+        {"cq_item"},
+        {"kg_summary", "doc_summary", "readme_summary", "web_summary", "repo_summary"},
+    ]
+    type_rank: Dict[str, int] = {}
+    for idx, group in enumerate(priority_groups):
+        for t in group:
+            type_rank[t] = idx
+    ranked: List[Dict[str, object]] = []
+    for pos, ev in enumerate(evidence):
+        ev_type = ev.get("type") if isinstance(ev, dict) else None
+        rank = type_rank.get(ev_type, len(priority_groups))
+        ranked.append((rank, pos, ev))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in ranked]
 
-    context: List[Dict[str, object]] = []
-    if origin == "repo":
-        context.extend(pick_by_types(["query_comment"], 5))
-        context.extend(pick_by_types(["readme_query_desc"], 2))
-        context.extend(pick_by_types(["doc_query_desc", "web_query_desc"], 2))
-        context.extend(pick_by_types(["doc_cq_section", "cq_list"], 1))
-    else:
-        context.extend(pick_by_types(["web_query_desc", "doc_query_desc"], 3))
-        context.extend(pick_by_types(["doc_cq_section", "cq_list"], 1))
-    return context[:6]
+
+def select_llm_context(evidence: List[Dict[str, object]], origin: str) -> List[str]:
+    # Keep all evidence, just ranked, as evidence_id list.
+    ranked = rank_llm_context(evidence)
+    ids: List[str] = []
+    for ev in ranked:
+        ev_id = ev.get("evidence_id") if isinstance(ev, dict) else None
+        if isinstance(ev_id, str) and ev_id:
+            ids.append(ev_id)
+    return ids
 
 
 def infer_query_origin(evidence: List[Dict[str, object]]) -> str:
@@ -1137,40 +1225,30 @@ def main() -> None:
                                 extracted_at,
                             )
                 if file_path.name.lower().startswith("readme"):
-                    cq_blocks = []
+                    cq_items = []
                     heading_blocks = extract_heading_bullets(text)
                     if heading_blocks:
-                        cq_blocks.extend(heading_blocks)
+                        cq_items.extend(heading_blocks)
                     else:
-                        cq_blocks.extend(extract_label_blocks(text))
+                        cq_items.extend(extract_label_blocks(text))
                     table_blocks = extract_table_blocks(text)
-                    if not cq_blocks and not table_blocks:
-                        cq_list = extract_cq_block(text)
-                        if cq_list:
-                            cq_blocks.append(cq_list)
+                    if table_blocks:
+                        cq_items.extend(table_blocks)
+                    if not cq_items:
+                        cq_items.extend(extract_cq_block(text))
                     for rec2 in records:
                         if rec2.get("kg_id") != kg_id:
                             continue
                         if query_has_doc_evidence(rec2):
                             continue
-                        for block in cq_blocks:
+                        for item in cq_items:
                             add_evidence(
                                 rec2,
-                                "cq_list",
+                                "cq_item",
                                 repo_url,
                                 source_path,
                                 str(repo_commit or ""),
-                                block,
-                                extracted_at,
-                            )
-                        for tbl in table_blocks:
-                            add_evidence(
-                                rec2,
-                                "doc_cq_section",
-                                repo_url,
-                                source_path,
-                                str(repo_commit or ""),
-                                tbl,
+                                clean_desc(item),
                                 extracted_at,
                             )
 
@@ -1186,40 +1264,30 @@ def main() -> None:
                     readme_text = readme.read_text(encoding="utf-8", errors="ignore")
                 except OSError:
                     continue
-                cq_blocks = []
+                cq_items = []
                 heading_blocks = extract_heading_bullets(readme_text)
                 if heading_blocks:
-                    cq_blocks.extend(heading_blocks)
+                    cq_items.extend(heading_blocks)
                 else:
-                    cq_blocks.extend(extract_label_blocks(readme_text))
+                    cq_items.extend(extract_label_blocks(readme_text))
                 table_blocks = extract_table_blocks(readme_text)
-                if not cq_blocks and not table_blocks:
-                    cq_list = extract_cq_block(readme_text)
-                    if cq_list:
-                        cq_blocks.append(cq_list)
+                if table_blocks:
+                    cq_items.extend(table_blocks)
+                if not cq_items:
+                    cq_items.extend(extract_cq_block(readme_text))
                 for rec2 in records:
                     if rec2.get("kg_id") != kg_id:
                         continue
                     if query_has_doc_evidence(rec2):
                         continue
-                    for block in cq_blocks:
+                    for item in cq_items:
                         add_evidence(
                             rec2,
-                            "cq_list",
+                            "cq_item",
                             repo_url,
                             str(readme.relative_to(repo_dir)),
                             "",
-                            block,
-                            extracted_at,
-                        )
-                    for tbl in table_blocks:
-                        add_evidence(
-                            rec2,
-                            "doc_cq_section",
-                            repo_url,
-                            str(readme.relative_to(repo_dir)),
-                            "",
-                            tbl,
+                            clean_desc(item),
                             extracted_at,
                         )
                 for block in extract_md_blocks_with_desc(readme_text) + extract_pre_blocks_with_desc(readme_text):
@@ -1266,17 +1334,17 @@ def main() -> None:
             source_url, body, raw_body = parse_source_file(src_path)
             if not body.strip():
                 continue
-            cq_blocks = []
+            cq_items = []
             heading_blocks = extract_heading_bullets(body)
             if heading_blocks:
-                cq_blocks.extend(heading_blocks)
+                cq_items.extend(heading_blocks)
             else:
-                cq_blocks.extend(extract_label_blocks(body))
+                cq_items.extend(extract_label_blocks(body))
             table_blocks = extract_table_blocks(body)
-            if not cq_blocks and not table_blocks:
-                cq_list = extract_cq_block(body)
-                if cq_list:
-                    cq_blocks.append(cq_list)
+            if table_blocks:
+                cq_items.extend(table_blocks)
+            if not cq_items:
+                cq_items.extend(extract_cq_block(body))
             for rec2 in records:
                 if rec2.get("kg_id") != kg_id:
                     continue
@@ -1286,24 +1354,14 @@ def main() -> None:
                 )
                 if not (has_same_source or query_has_repo_evidence(rec2)):
                     continue
-                for block in cq_blocks:
+                for item in cq_items:
                     add_evidence(
                         rec2,
-                        "cq_list",
+                        "cq_item",
                         source_url or "",
                         str(src_path),
                         "",
-                        clean_desc(block),
-                        extracted_at,
-                    )
-                for tbl in table_blocks:
-                    add_evidence(
-                        rec2,
-                        "doc_cq_section",
-                        source_url or "",
-                        str(src_path),
-                        "",
-                        tbl,
+                        clean_desc(item),
                         extracted_at,
                     )
                 if table_blocks:
@@ -1334,8 +1392,8 @@ def main() -> None:
                             extracted_at,
                         )
 
-            cq_section = extract_cq_section(body)
-            if cq_section and not doc_cq_seen and not table_blocks:
+            cq_section_items = extract_cq_section(body)
+            if cq_section_items and not doc_cq_seen and not table_blocks:
                 for rec2 in records:
                     if rec2.get("kg_id") != kg_id:
                         continue
@@ -1344,15 +1402,16 @@ def main() -> None:
                         for e in rec2.get("evidence", []) or []
                     ):
                         continue
-                    add_evidence(
-                        rec2,
-                        "doc_cq_section",
-                        source_url or "",
-                        str(src_path),
-                        "",
-                        clean_desc(cq_section),
-                        extracted_at,
-                    )
+                    for item in cq_section_items:
+                        add_evidence(
+                            rec2,
+                            "cq_item",
+                            source_url or "",
+                            str(src_path),
+                            "",
+                            clean_desc(item),
+                            extracted_at,
+                        )
 
         # Extract evidence from PDFs by filename match or explicit doc paths.
         pdf_paths: List[Path] = []
@@ -1383,7 +1442,7 @@ def main() -> None:
                     if not (
                         isinstance(e, dict)
                         and e.get("source_path") == str(pdf_path)
-                        and e.get("type") in {"doc_cq_section", "doc_query_desc"}
+                        and e.get("type") in {"cq_item", "doc_query_desc"}
                     )
                 ]
             pdf_text = extract_text_from_pdf(pdf_path)
@@ -1403,7 +1462,7 @@ def main() -> None:
             heading_blocks = [] if (caption_hits or cq_bullets) else extract_heading_bullets(pdf_text)
             label_blocks = [] if (caption_hits or cq_bullets) else extract_label_blocks(pdf_text)
             fallback_tables = [] if (caption_hits or cq_bullets) else extract_table_blocks(pdf_text)
-            cq_section = None if (caption_hits or cq_bullets) else extract_cq_section(pdf_text)
+            cq_section_items = [] if (caption_hits or cq_bullets) else extract_cq_section(pdf_text)
             pdf_lines = pdf_text.splitlines()
             for rec2 in records:
                 if rec2.get("kg_id") != kg_id:
@@ -1414,29 +1473,31 @@ def main() -> None:
                 ) and not query_has_repo_evidence(rec2):
                     continue
                 for tbl in cq_table_blocks:
-                    add_evidence(
-                        rec2,
-                        "doc_cq_section",
-                        "",
-                        str(pdf_path),
-                        "",
-                        tbl,
-                        extracted_at,
-                    )
+                    for item in split_cq_block_items(tbl):
+                        add_evidence(
+                            rec2,
+                            "cq_item",
+                            "",
+                            str(pdf_path),
+                            "",
+                            clean_desc(item),
+                            extracted_at,
+                        )
                 for bullet_block in cq_bullets:
-                    add_evidence(
-                        rec2,
-                        "doc_cq_section",
-                        "",
-                        str(pdf_path),
-                        "",
-                        clean_desc(bullet_block),
-                        extracted_at,
-                    )
+                    for item in extract_bullet_items(bullet_block.splitlines()):
+                        add_evidence(
+                            rec2,
+                            "cq_item",
+                            "",
+                            str(pdf_path),
+                            "",
+                            clean_desc(item),
+                            extracted_at,
+                        )
                 for block in heading_blocks + label_blocks:
                     add_evidence(
                         rec2,
-                        "doc_cq_section",
+                        "cq_item",
                         "",
                         str(pdf_path),
                         "",
@@ -1444,23 +1505,24 @@ def main() -> None:
                         extracted_at,
                     )
                 for tbl in fallback_tables:
+                    for item in split_cq_block_items(tbl):
+                        add_evidence(
+                            rec2,
+                            "cq_item",
+                            "",
+                            str(pdf_path),
+                            "",
+                            clean_desc(item),
+                            extracted_at,
+                        )
+                for item in cq_section_items:
                     add_evidence(
                         rec2,
-                        "doc_cq_section",
+                        "cq_item",
                         "",
                         str(pdf_path),
                         "",
-                        tbl,
-                        extracted_at,
-                    )
-                if cq_section:
-                    add_evidence(
-                        rec2,
-                        "doc_cq_section",
-                        "",
-                        str(pdf_path),
-                        "",
-                        clean_desc(cq_section),
+                        clean_desc(item),
                         extracted_at,
                     )
 
@@ -1539,6 +1601,21 @@ def main() -> None:
                 after_counts[kg_id] = after_counts.get(kg_id, 0) + len(rec["evidence"])
             origin = infer_query_origin(rec["evidence"])
             rec["llm_context"] = select_llm_context(rec["evidence"], origin)
+            rec.pop("llm_context_ranked", None)
+            rec.pop("cq_items", None)
+            rec.pop("justification", None)
+            rec.pop("comments", None)
+            if "confidence" not in rec:
+                rec["confidence"] = None
+            if "llm_output" not in rec:
+                rec["llm_output"] = {
+                    "ranked_evidence_phrases": [],
+                    "final_question": None,
+                    "question_source": None,
+                    "confidence": None,
+                    "confidence_rationale": None,
+                    "needs_review": None,
+                }
 
     write_jsonl(queries_path, records)
     print(f"Wrote {len(records)} records to {queries_path.resolve()}")

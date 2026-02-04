@@ -115,21 +115,22 @@ One record per query, with provenance and run history:
           "extractor_version": "extract_queries.py@v1"
         }
       ],
-      "cq_items": [
-        {
-          "cq_id": "cq1",
-          "text": "Which vocabularies classify musical instruments?",
-          "source_evidence_ids": ["e1"]
-        }
-      ],
+      "llm_context": ["e1", "e2", "e3"],
+      "confidence": null,
+      "llm_output": {
+        "ranked_evidence_phrases": [],
+        "final_question": null,
+        "question_source": null,
+        "confidence": null,
+        "confidence_rationale": null,
+        "needs_review": null
+      },
       "nl_question": {
         "text": null,
         "source": null,
         "generated_at": null,
         "generator": null
       },
-      "justification": null,
-      "comments": null,
       "verification": {
         "status": "unverified",
         "notes": null
@@ -164,7 +165,10 @@ One record per query, with provenance and run history:
 Notes:
 
 - `evidence` is the single place for raw extractions (repos/docs/papers/etc).
-- `cq_items` link CQs to evidence; later we can generate SPARQL from CQs.
+- CQ items are stored as `evidence` entries with `type: cq_item`.
+- `llm_context` is the full ranked list of evidence ids for LLM consumption.
+- `confidence` is a combined score (LLM confidence + runnability + heuristics).
+- `llm_output` stores the generated NL question, provenance, and LLM confidence.
 - `latest_run` and `latest_successful_run` are convenience fields; `run_history` is optional.
 - These run-related fields are populated when producing `run_queries.jsonl`.
 - `dataset` supports future KGs without endpoints (local dumps).
@@ -311,12 +315,22 @@ This step establishes **ground-truth executability** for each query record.
 
 ### Process (LLM with schema enforcement)
 
-For each runnable query, generate an object of the form:
+For each runnable query, generate an object of the form (stored in `llm_output`):
 
     {
-      "nl_question": "...",
-      "confidence_percent": 92,
-      "confidence_reason": "..."
+      "ranked_evidence_phrases": [
+        {
+          "text": "...",
+          "evidence_id": "e12",
+          "source_type": "query_comment",
+          "rank": 1,
+          "verbatim": true
+        }
+      ],
+      "final_question": "...",
+      "question_source": "verbatim|paraphrased|generated",
+      "confidence": 92,
+      "confidence_rationale": "..."
     }
 
 Guidelines:
@@ -325,11 +339,21 @@ Guidelines:
 - Avoid ontology jargon unless unavoidable.
 - Lower confidence if semantics are ambiguous.
 
+### Evidence ranking for LLM input
+
+Provide the full ranked evidence list to the LLM (do not filter; prefer ranking).
+Priority order:
+
+1. `query_comment` (SPARQL comments)
+2. `doc_query_desc` / `web_query_desc` / `readme_query_desc`
+3. `cq_item`
+4. general KG descriptions (`kg_summary`, `doc_summary`, `readme_summary`, `web_summary`, `repo_summary`)
+
 Optionally run a second **consistency-check pass** to downgrade overconfident pairs.
 
 ### Filtering rule
 
-- Keep only pairs with `confidence_percent ≥ 85`.
+- Keep only pairs with `confidence ≥ 85`.
 - Lower-confidence pairs go to review or discard.
 
 ### Output
