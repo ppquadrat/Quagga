@@ -114,7 +114,61 @@ def normalize_query(text: str) -> str:
     normalized = text.strip()
     while normalized.endswith(";"):
         normalized = normalized[:-1].rstrip()
-    return normalized
+    lines = normalized.splitlines()
+    # Deduplicate prefix declarations (keep first).
+    seen_prefixes = set()
+    deduped_lines: List[str] = []
+    prefix_decl_re = re.compile(r"(?im)^\s*prefix\s+(\w+):")
+    for line in lines:
+        match = prefix_decl_re.match(line)
+        if match:
+            prefix_name = match.group(1).lower()
+            if prefix_name in seen_prefixes:
+                continue
+            seen_prefixes.add(prefix_name)
+        deduped_lines.append(line)
+    normalized = "\n".join(deduped_lines)
+    # Canonicalize common uppercase prefixes (e.g., RDF:) to lowercase.
+    for p in ("rdf", "rdfs", "xsd", "dc", "dtl", "event", "mo", "tl", "foaf"):
+        normalized = re.sub(rf"\b{p.upper()}:", f"{p}:", normalized)
+    # Inject missing prefixes if they are used.
+    prefix_map = {
+        "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+        "xsd": "http://www.w3.org/2001/XMLSchema#",
+        "dc": "http://purl.org/dc/elements/1.1/",
+        "dtl": "http://www.DTL.org/schema/properties/",
+        "event": "http://purl.org/NET/c4dm/event.owl#",
+        "mo": "http://purl.org/ontology/mo/",
+        "tl": "http://purl.org/NET/c4dm/timeline.owl#",
+        "foaf": "http://xmlns.com/foaf/0.1/",
+    }
+    existing = {m.group(1).lower() for m in re.finditer(r"(?im)^\s*prefix\s+(\w+):", normalized)}
+    needed: List[str] = []
+    for prefix, iri in prefix_map.items():
+        if prefix in existing:
+            continue
+        if re.search(rf"\b{re.escape(prefix)}:", normalized):
+            needed.append(f"PREFIX {prefix}: <{iri}>")
+    if needed:
+        normalized = "\n".join(needed) + "\n" + normalized
+        # Re-dedupe after injection.
+        lines = normalized.splitlines()
+        seen_prefixes = set()
+        deduped_lines = []
+        for line in lines:
+            match = prefix_decl_re.match(line)
+            if match:
+                prefix_name = match.group(1).lower()
+                if prefix_name in seen_prefixes:
+                    continue
+                seen_prefixes.add(prefix_name)
+            deduped_lines.append(line)
+        normalized = "\n".join(deduped_lines)
+    # Collapse excessive whitespace (keep newlines).
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r"\\n{3,}", "\\n\\n", normalized)
+    return normalized.strip()
 
 
 def split_queries(text: str) -> List[str]:

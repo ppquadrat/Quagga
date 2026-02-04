@@ -21,6 +21,7 @@ class KGEndpoint:
     kg_id: str
     endpoint: str
     graph: Optional[str] = None
+    fallbacks: List[str] = None
 
 
 @dataclass
@@ -54,12 +55,23 @@ def load_endpoints(path: Path) -> Dict[str, KGEndpoint]:
             continue
         endpoint = sparql.get("endpoint")
         graph = sparql.get("graph")
+        fallbacks_raw = sparql.get("fallbacks")
+        fallbacks: List[str] = []
+        if isinstance(fallbacks_raw, list):
+            for fb in fallbacks_raw:
+                if isinstance(fb, dict):
+                    fb_ep = fb.get("endpoint")
+                    if isinstance(fb_ep, str) and fb_ep.strip():
+                        fallbacks.append(fb_ep.strip())
+                elif isinstance(fb, str) and fb.strip():
+                    fallbacks.append(fb.strip())
         if isinstance(endpoint, str) and endpoint.strip():
             graph_val = graph.strip() if isinstance(graph, str) and graph.strip() else None
             endpoints[kg_id.strip()] = KGEndpoint(
                 kg_id=kg_id.strip(),
                 endpoint=endpoint.strip(),
                 graph=graph_val,
+                fallbacks=fallbacks,
             )
     return endpoints
 
@@ -171,6 +183,7 @@ def run_select_query(endpoint: str, query: str, timeout_s: int = 30) -> Dict[str
     }
     data = {"query": query, "format": "application/sparql-results+json"}
     raw_headers = headers | {"Content-Type": "application/sparql-query"}
+    data_querystr = {"queryStr": query, "format": "application/sparql-results+json"}
     try:
         resp = requests.post(endpoint, data=data, headers=headers, timeout=timeout_s)
     except requests.RequestException as e:
@@ -180,6 +193,28 @@ def run_select_query(endpoint: str, query: str, timeout_s: int = 30) -> Dict[str
         # Some endpoints expect application/sparql-query POST bodies.
         try:
             resp = requests.post(endpoint, data=query.encode("utf-8"), headers=raw_headers, timeout=timeout_s)
+        except requests.RequestException as e:
+            return {"status": "request_error", "error": f"{e.__class__.__name__}"}
+        if resp.status_code == 200:
+            content_type = resp.headers.get("Content-Type", "")
+            if "application/json" in content_type.lower() or "application/sparql-results+json" in content_type.lower():
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    payload = None
+                if payload is not None:
+                    results = payload.get("results", {})
+                    bindings = results.get("bindings", [])
+                    if isinstance(bindings, list):
+                        count = len(bindings)
+                        sample = bindings[0] if bindings else None
+                        return {"status": "ok" if count > 0 else "empty", "result_count": count, "sample_row": sample}
+            xml_result = parse_sparql_xml(resp.text)
+            if xml_result is not None:
+                return xml_result
+        # Some endpoints expect queryStr instead of query.
+        try:
+            resp = requests.post(endpoint, data=data_querystr, headers=headers, timeout=timeout_s)
         except requests.RequestException as e:
             return {"status": "request_error", "error": f"{e.__class__.__name__}"}
         if resp.status_code == 200:
@@ -249,6 +284,28 @@ def run_select_query(endpoint: str, query: str, timeout_s: int = 30) -> Dict[str
                         sample = bindings[0] if bindings else None
                         return {"status": "ok" if count > 0 else "empty", "result_count": count, "sample_row": sample}
             xml_result = parse_sparql_xml(alt.text)
+            if xml_result is not None:
+                return xml_result
+        # Try queryStr fallback before classifying as query_error.
+        try:
+            alt2 = requests.post(endpoint, data=data_querystr, headers=headers, timeout=timeout_s)
+        except requests.RequestException:
+            alt2 = None
+        if alt2 is not None and alt2.status_code == 200:
+            alt_type = alt2.headers.get("Content-Type", "")
+            if "application/json" in alt_type.lower() or "application/sparql-results+json" in alt_type.lower():
+                try:
+                    payload = alt2.json()
+                except ValueError:
+                    payload = None
+                if payload is not None:
+                    results = payload.get("results", {})
+                    bindings = results.get("bindings", [])
+                    if isinstance(bindings, list):
+                        count = len(bindings)
+                        sample = bindings[0] if bindings else None
+                        return {"status": "ok" if count > 0 else "empty", "result_count": count, "sample_row": sample}
+            xml_result = parse_sparql_xml(alt2.text)
             if xml_result is not None:
                 return xml_result
     try:
@@ -375,10 +432,23 @@ def ensure_prefixes(query: str) -> str:
         "tl": "http://purl.org/NET/c4dm/timeline.owl#",
         "foaf": "http://xmlns.com/foaf/0.1/",
     }
-    normalized_query = query
+    # Deduplicate prefix declarations (keep first).
+    lines = query.splitlines()
+    seen_prefixes = set()
+    deduped_lines: List[str] = []
+    prefix_decl_re = re.compile(r"(?im)^\s*prefix\s+(\w+):")
+    for line in lines:
+        match = prefix_decl_re.match(line)
+        if match:
+            prefix_name = match.group(1).lower()
+            if prefix_name in seen_prefixes:
+                continue
+            seen_prefixes.add(prefix_name)
+        deduped_lines.append(line)
+    normalized_query = "\n".join(deduped_lines)
     for prefix in prefix_map:
         normalized_query = re.sub(rf"\b{prefix.upper()}:", f"{prefix}:", normalized_query)
-    existing = {m.group(1).lower() for m in re.finditer(r"(?im)^\\s*prefix\\s+(\\w+):", normalized_query)}
+    existing = {m.group(1).lower() for m in re.finditer(r"(?im)^\s*prefix\s+(\w+):", normalized_query)}
     needed: List[str] = []
     for prefix, iri in prefix_map.items():
         if prefix in existing:
@@ -386,20 +456,33 @@ def ensure_prefixes(query: str) -> str:
         if re.search(rf"\b{re.escape(prefix)}:", normalized_query):
             needed.append(f"PREFIX {prefix}: <{iri}>")
     if needed:
-        return "\n".join(needed) + "\n" + normalized_query
-    return normalized_query
+        normalized_query = "\n".join(needed) + "\n" + normalized_query
+    # Final pass: drop any duplicate PREFIX lines introduced along the way.
+    lines = normalized_query.splitlines()
+    seen_prefixes = set()
+    cleaned_lines: List[str] = []
+    prefix_decl_re = re.compile(r"(?im)^\s*prefix\s+(\w+):")
+    for line in lines:
+        match = prefix_decl_re.match(line)
+        if match:
+            prefix_name = match.group(1).lower()
+            if prefix_name in seen_prefixes:
+                continue
+            seen_prefixes.add(prefix_name)
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
 
 
 def apply_graph(query: str, graph: Optional[str]) -> str:
     if not graph:
         return query
     # Avoid rewriting if the query already declares a dataset.
-    if re.search(r"(?im)^\\s*from\\b", query):
+    if re.search(r"(?im)^\s*from\b", query):
         return query
     lines = query.splitlines()
     insert_at = 0
     for i, line in enumerate(lines):
-        if re.match(r"(?im)^\\s*(prefix|base)\\b", line):
+        if re.match(r"(?im)^\s*(prefix|base)\b", line):
             insert_at = i + 1
         elif line.strip() and not line.lstrip().startswith("#"):
             break
@@ -503,6 +586,8 @@ def main() -> None:
         query = rec.get("sparql_clean")
         if not isinstance(kg_id, str) or not isinstance(query, str):
             continue
+        if kg_id.lower() == "musow":
+            time.sleep(0.25)
         if current_kg != kg_id:
             current_kg = kg_id
             print(f"\nRunning queries for {kg_id} ({totals.get(kg_id, 0)} total)")
@@ -519,12 +604,13 @@ def main() -> None:
                 "failed": 0,
                 "skipped_no_endpoint": 0,
                 "skipped_local": 0,
+                "skipped_endpoint_unavailable": 0,
             },
         )
         stat["attempted"] += 1
         endpoint = endpoints.get(kg_id)
         dataset = datasets.get(kg_id)
-        if endpoint is not None and kg_id in unhealthy_endpoints:
+        if endpoint is not None and kg_id in unhealthy_endpoints and not (endpoint.fallbacks or []):
             failures.append(
                 {
                     "kg_id": kg_id,
@@ -535,16 +621,7 @@ def main() -> None:
                     "sparql_hash": rec.get("sparql_hash"),
                 }
             )
-            stat["skipped_local"] += 1
-            rec["latest_run"] = {
-                "ran_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-                "status": "skipped_endpoint_unavailable",
-                "endpoint": endpoint.endpoint,
-                "result_count": None,
-                "sample_row": None,
-                "duration_ms": 0,
-                "error": None,
-            }
+            stat["skipped_endpoint_unavailable"] += 1
             continue
         if endpoint is None and dataset is None:
             skipped_no_endpoint += 1
@@ -552,9 +629,7 @@ def main() -> None:
             continue
 
         query_to_run = clean_query(query)
-        query_to_run = ensure_prefixes(query_to_run)
         if endpoint is not None:
-            query_to_run = apply_graph(query_to_run, endpoint.graph)
             if not is_remote_executable(query_to_run):
                 failures.append(
                     {
@@ -579,8 +654,18 @@ def main() -> None:
                 continue
         stat["ran"] += 1
         start = time.time()
+        endpoint_used = None
         if endpoint is not None:
-            result = run_select_query(endpoint.endpoint, query_to_run)
+            endpoint_list = [endpoint.endpoint] + (endpoint.fallbacks or [])
+            result = {"status": "request_error", "error": "No endpoint tried"}
+            for ep in endpoint_list:
+                query_with_graph = apply_graph(query_to_run, endpoint.graph)
+                result = run_select_query(ep, query_with_graph)
+                endpoint_used = ep
+                if result.get("status") in {"ok", "empty"}:
+                    break
+                if result.get("status") not in {"request_error", "http_error", "bad_json", "query_error", "parse_error"}:
+                    break
         else:
             dump_path = ensure_dump_available(dataset, limit_mb=max_dump_mb)
             if kg_id not in graphs:
@@ -609,7 +694,7 @@ def main() -> None:
         latest_run = {
             "ran_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "status": status,
-            "endpoint": endpoint.endpoint if endpoint is not None else None,
+            "endpoint": endpoint_used if endpoint is not None else None,
             "result_count": result.get("result_count"),
             "sample_row": result.get("sample_row"),
             "duration_ms": duration_ms,
@@ -631,7 +716,7 @@ def main() -> None:
             failures.append(
                 {
                     "kg_id": kg_id,
-                    "endpoint": endpoint.endpoint if endpoint is not None else None,
+                    "endpoint": endpoint_used if endpoint is not None else None,
                     "status": status,
                     "http_status": result.get("http_status"),
                     "content_type": result.get("content_type"),
@@ -671,7 +756,8 @@ def main() -> None:
                 f"- {kg_id}: runnable {runnable}/{attempted} (ran={ran}, "
                 f"ok={stat['ok']}, empty={stat['empty']}, failed={stat['failed']}, "
                 f"skipped_no_endpoint={stat['skipped_no_endpoint']}, "
-                f"skipped_local={stat['skipped_local']})"
+                f"skipped_local={stat['skipped_local']}, "
+                f"skipped_endpoint_unavailable={stat['skipped_endpoint_unavailable']})"
             )
         if failures:
             error_lines: Dict[str, int] = {}

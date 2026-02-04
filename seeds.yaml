@@ -8,6 +8,10 @@
     sparql:
       endpoint: https://polifonia.disi.unibo.it/organs/sparql
       auth: none
+      graph: http://w3id.org/polifonia/resource/organs/
+      fallbacks:
+        - endpoint: https://data.open.ac.uk/sparql
+          auth: none
     repos:
       - https://github.com/polifonia-project/organs-knowledge-graph
     docs:
@@ -25,6 +29,9 @@
     sparql:
       endpoint: https://polifonia.disi.unibo.it/meetups/sparql
       auth: none
+      fallbacks:
+        - endpoint: https://data.open.ac.uk/sparql
+          auth: none
     repos:
       - https://github.com/polifonia-project/meetups-knowledge-graph
     docs:
@@ -43,7 +50,7 @@
       concepts, vocabularies, and scholarly classifications using SKOS and
       related ontologies.
     sparql:
-      endpoint: https://polifonia.disi.unibo.it/meetups/sparql
+      endpoint: https://data.open.ac.uk/sparql
       auth: none
       expected_namespaces:
         - http://w3id.org/polifonia/ontology/musow#
