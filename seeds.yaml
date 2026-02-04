@@ -83,6 +83,10 @@
     description_hint: >
       Ontology and RDF datasets for jazz metadata, performances, sessions,
       recordings, and related discographic information.
+    dataset:
+      dump_url: https://osf.io/qnb4k/download
+      local_path: dumps/jazzontology.ttl
+      format: turtle
     repos:
       - https://github.com/ppquadrat/DigThatLick
     docs:

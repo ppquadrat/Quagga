@@ -201,6 +201,21 @@ def is_select_query(text: str) -> bool:
     return match.group(1).lower() == "select"
 
 
+def is_well_formed_query(query: str) -> bool:
+    text = query.strip()
+    if not text:
+        return False
+    if re.match(r"(?im)^\s*where\b", text):
+        return False
+    if not re.search(r"(?im)\bselect\b", text):
+        return False
+    if not re.search(r"(?im)\bwhere\b", text):
+        return False
+    if text.count("{") != text.count("}"):
+        return False
+    return True
+
+
 def sha256_hash(text: str) -> str:
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
@@ -520,6 +535,8 @@ def main() -> None:
                         continue
                     if not is_select_query(normalized):
                         continue
+                    if not is_well_formed_query(normalized):
+                        continue
                     clean_hash = sha256_hash(normalized)
                     raw_hash = sha256_hash(item["query"])
                     key = (kg.kg_id, clean_hash)
@@ -573,6 +590,8 @@ def main() -> None:
                 if not normalized:
                     continue
                 if not is_select_query(normalized):
+                    continue
+                if not is_well_formed_query(normalized):
                     continue
                 clean_hash = sha256_hash(normalized)
                 raw_hash = sha256_hash(q)
@@ -628,6 +647,8 @@ def main() -> None:
                     if not normalized:
                         continue
                     if not is_select_query(normalized):
+                        continue
+                    if not is_well_formed_query(normalized):
                         continue
                     clean_hash = sha256_hash(normalized)
                     raw_hash = sha256_hash(q)

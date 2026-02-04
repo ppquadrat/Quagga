@@ -32,6 +32,14 @@ class KGSeed:
     docs: List[str] = None
     priority: Optional[str] = None
     notes: Optional[str] = None
+    dataset: Optional["KGDataset"] = None
+
+
+@dataclass
+class KGDataset:
+    dump_url: Optional[str] = None
+    local_path: Optional[str] = None
+    format: Optional[str] = None
 
 
 def slugify_filename(text: str, max_len: int = 80) -> str:
@@ -186,6 +194,26 @@ def parse_kg_seed(raw: Dict[str, Any]) -> KGSeed:
             expected_namespaces=expected_namespaces,
         )
 
+    dataset_cfg = None
+    dataset = raw.get("dataset")
+    if dataset is not None:
+        if not isinstance(dataset, dict):
+            raise ValueError(f"KG '{kg_id}': dataset must be a mapping (dict).")
+        dump_url = dataset.get("dump_url")
+        local_path = dataset.get("local_path")
+        fmt = dataset.get("format")
+        if dump_url is not None and not isinstance(dump_url, str):
+            raise ValueError(f"KG '{kg_id}': dataset.dump_url must be a string.")
+        if local_path is not None and not isinstance(local_path, str):
+            raise ValueError(f"KG '{kg_id}': dataset.local_path must be a string.")
+        if fmt is not None and not isinstance(fmt, str):
+            raise ValueError(f"KG '{kg_id}': dataset.format must be a string.")
+        dataset_cfg = KGDataset(
+            dump_url=dump_url.strip() if isinstance(dump_url, str) else None,
+            local_path=local_path.strip() if isinstance(local_path, str) else None,
+            format=fmt.strip() if isinstance(fmt, str) else None,
+        )
+
     return KGSeed(
         kg_id=kg_id.strip(),
         name=name.strip(),
@@ -196,6 +224,7 @@ def parse_kg_seed(raw: Dict[str, Any]) -> KGSeed:
         docs=docs,
         priority=raw.get("priority"),
         notes=raw.get("notes"),
+        dataset=dataset_cfg,
     )
 
 
@@ -210,13 +239,20 @@ def kgseed_to_record(kg: KGSeed) -> Dict[str, Any]:
         }
         if kg.sparql.expected_namespaces:
             sparql_obj["expected_namespaces"] = list(kg.sparql.expected_namespaces)
+    dataset_obj = {"dump_url": None, "local_path": None, "format": None}
+    if kg.dataset:
+        dataset_obj = {
+            "dump_url": kg.dataset.dump_url,
+            "local_path": kg.dataset.local_path,
+            "format": kg.dataset.format,
+        }
     return {
         "kg_id": kg.kg_id,
         "name": kg.name,
         "project": kg.project,
         "description": None,
         "sparql": sparql_obj,
-        "dataset": {"dump_url": None, "local_path": None, "format": None},
+        "dataset": dataset_obj,
         "repos": list(kg.repos or []),
         "docs": list(kg.docs or []),
         "notes": kg.notes,
