@@ -115,7 +115,6 @@ One record per query, with provenance and run history:
           "extractor_version": "extract_queries.py@v1"
         }
       ],
-      "llm_context": ["e1", "e2", "e3"],
       "confidence": null,
       "llm_output": {
         "ranked_evidence_phrases": [],
@@ -166,7 +165,6 @@ Notes:
 
 - `evidence` is the single place for raw extractions (repos/docs/papers/etc).
 - CQ items are stored as `evidence` entries with `type: cq_item`.
-- `llm_context` is the full ranked list of evidence ids for LLM consumption.
 - `confidence` is a combined score (LLM confidence + runnability + heuristics).
 - `llm_output` stores the generated NL question, provenance, and LLM confidence.
 - `latest_run` and `latest_successful_run` are convenience fields; `run_history` is optional.
@@ -339,10 +337,9 @@ Guidelines:
 - Avoid ontology jargon unless unavoidable.
 - Lower confidence if semantics are ambiguous.
 
-### Evidence ranking for LLM input
+### Evidence prioritization for LLM input
 
-Provide the full ranked evidence list to the LLM (do not filter; prefer ranking).
-Priority order:
+Provide the full evidence list to the LLM and specify a preference order by type:
 
 1. `query_comment` (SPARQL comments)
 2. `doc_query_desc` / `web_query_desc` / `readme_query_desc`

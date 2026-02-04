@@ -256,6 +256,14 @@ def add_evidence(
     if not isinstance(evidence, list):
         evidence = []
     snippet = snippet.strip()
+    if not snippet:
+        return
+    if evidence_type == "cq_item":
+        snippet = clean_desc(snippet)
+        if not snippet:
+            return
+        if re.match(r"^\s*(table|figure|algorithm)\s+\d+[:.].*competency\s+questions", snippet, re.IGNORECASE):
+            return
     for ev in evidence:
         if not isinstance(ev, dict):
             continue
@@ -792,8 +800,12 @@ def extract_cq_items_from_text(text: str) -> List[str]:
         return items
     for line in text.splitlines():
         if "question" in line.lower() or line.strip().lower().startswith("cq"):
-            items.append(line.strip())
-    return [item for item in items if item]
+            line = line.strip()
+            items.extend(split_multi_cq_line(line))
+    split_items: List[str] = []
+    for item in items:
+        split_items.extend(split_numbered_sequence(item))
+    return [item for item in split_items if item]
 
 
 def extract_heading_bullets(text: str) -> List[str]:
@@ -894,7 +906,10 @@ def split_cq_block_items(block: str) -> List[str]:
             row = [c.strip() for c in ln.strip("|").split("|") if c.strip()]
             if row:
                 items.append(" | ".join(row))
-        return [item for item in items if item]
+        split_items: List[str] = []
+        for item in items:
+            split_items.extend(split_numbered_sequence(item))
+        return [item for item in split_items if item]
     label_re = re.compile(r"^(?:[A-Z]{2,3}\d+|CQ\d+|CT\d+|DR\d+|\d+)\b", re.IGNORECASE)
     items: List[str] = []
     current: List[str] = []
@@ -911,7 +926,44 @@ def split_cq_block_items(block: str) -> List[str]:
         items.append(ln)
     if current:
         items.append(" ".join(current).strip())
-    return [item for item in items if item]
+    split_items: List[str] = []
+    for item in items:
+        split_items.extend(split_numbered_sequence(item))
+    return [item for item in split_items if item]
+
+
+def split_numbered_sequence(text: str) -> List[str]:
+    line = text.strip()
+    if not line:
+        return []
+    matches = list(re.finditer(r"\b\d+\s+\w", line))
+    if len(matches) < 2:
+        return [line]
+    parts: List[str] = []
+    starts = [m.start() for m in matches]
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(line)
+        part = line[start:end].strip()
+        if part:
+            parts.append(part)
+    return parts if parts else [line]
+
+
+def split_multi_cq_line(line: str) -> List[str]:
+    if not line:
+        return []
+    if len(re.findall(r"\bCQ\d+\b", line, flags=re.IGNORECASE)) < 2:
+        return [line]
+    parts = re.findall(r"(CQ\d+.*?)(?=\bCQ\d+\b|$)", line, flags=re.IGNORECASE)
+    cleaned: List[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if "?" in part:
+            part = part[: part.rfind("?") + 1].strip()
+        cleaned.append(part)
+    return cleaned if cleaned else [line]
 
 
 def extract_context_for_code(text: str, start_idx: int) -> Optional[str]:
@@ -1041,17 +1093,6 @@ def rank_llm_context(evidence: List[Dict[str, object]]) -> List[Dict[str, object
     return [item[2] for item in ranked]
 
 
-def select_llm_context(evidence: List[Dict[str, object]], origin: str) -> List[str]:
-    # Keep all evidence, just ranked, as evidence_id list.
-    ranked = rank_llm_context(evidence)
-    ids: List[str] = []
-    for ev in ranked:
-        ev_id = ev.get("evidence_id") if isinstance(ev, dict) else None
-        if isinstance(ev_id, str) and ev_id:
-            ids.append(ev_id)
-    return ids
-
-
 def infer_query_origin(evidence: List[Dict[str, object]]) -> str:
     for ev in evidence:
         if not isinstance(ev, dict):
@@ -1069,12 +1110,58 @@ def dedupe_evidence(evidence: List[Dict[str, object]]) -> List[Dict[str, object]
     for ev in evidence:
         if not isinstance(ev, dict):
             continue
+        snippet = ev.get("snippet") or ""
+        if not isinstance(snippet, str) or not snippet.strip():
+            continue
+        if ev.get("type") == "cq_item":
+            cleaned = clean_desc(snippet)
+            if not cleaned:
+                continue
+            if re.match(r"^\s*(table|figure|algorithm)\s+\d+[:.].*competency\s+questions", cleaned, re.IGNORECASE):
+                continue
+            ev = {**ev, "snippet": cleaned}
         key = (ev.get("type"), ev.get("source_path"), ev.get("snippet"))
         if key in seen:
             continue
         seen.add(key)
         deduped.append(ev)
     return deduped
+
+
+def expand_cq_items(evidence: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    expanded: List[Dict[str, object]] = []
+    for ev in evidence:
+        if not isinstance(ev, dict) or ev.get("type") != "cq_item":
+            expanded.append(ev)
+            continue
+        snippet = ev.get("snippet") or ""
+        if not isinstance(snippet, str) or not snippet.strip():
+            continue
+        parts = split_multi_cq_line(snippet)
+        split_items: List[str] = []
+        for part in parts:
+            split_items.extend(split_numbered_sequence(part))
+        if len(split_items) <= 1:
+            expanded.append(ev)
+            continue
+        for part in split_items:
+            if not part.strip():
+                continue
+            new_ev = dict(ev)
+            new_ev["snippet"] = part.strip()
+            expanded.append(new_ev)
+    return expanded
+
+
+def renumber_evidence(evidence: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    renumbered: List[Dict[str, object]] = []
+    for idx, ev in enumerate(evidence, start=1):
+        if not isinstance(ev, dict):
+            continue
+        ev = dict(ev)
+        ev["evidence_id"] = f"e{idx}"
+        renumbered.append(ev)
+    return renumbered
 
 
 def main() -> None:
@@ -1592,15 +1679,14 @@ def main() -> None:
     for rec in records:
         evidence = rec.get("evidence")
         if isinstance(evidence, list):
-            rec["evidence"] = dedupe_evidence(evidence)
+            rec["evidence"] = renumber_evidence(dedupe_evidence(expand_cq_items(evidence)))
             for ev in rec["evidence"]:
                 if isinstance(ev, dict) and ev.get("type"):
                     type_counts[ev["type"]] = type_counts.get(ev["type"], 0) + 1
             kg_id = rec.get("kg_id")
             if isinstance(kg_id, str):
                 after_counts[kg_id] = after_counts.get(kg_id, 0) + len(rec["evidence"])
-            origin = infer_query_origin(rec["evidence"])
-            rec["llm_context"] = select_llm_context(rec["evidence"], origin)
+            rec.pop("llm_context", None)
             rec.pop("llm_context_ranked", None)
             rec.pop("cq_items", None)
             rec.pop("justification", None)
