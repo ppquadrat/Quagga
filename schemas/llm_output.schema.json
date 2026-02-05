@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quagga.local/schemas/llm_output.schema.json",
+  "title": "Quagga LLM Output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ranked_evidence_phrases",
+    "nl_question",
+    "nl_question_origin",
+    "confidence",
+    "confidence_rationale",
+    "needs_review"
+  ],
+  "properties": {
+    "ranked_evidence_phrases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "text",
+          "evidence_id",
+          "source_type",
+          "rank",
+          "verbatim"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_id": {
+            "type": "string",
+            "pattern": "^e[0-9]+$"
+          },
+          "source_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rank": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "verbatim": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "nl_question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nl_question_origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "evidence_ids",
+        "primary_evidence_id"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "verbatim",
+            "paraphrased",
+            "generated"
+          ]
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^e[0-9]+$"
+          },
+          "uniqueItems": true
+        },
+        "primary_evidence_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^e[0-9]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "confidence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "confidence_rationale": {
+      "type": "string",
+      "minLength": 1
+    },
+    "needs_review": {
+      "type": "boolean"
+    }
+  }
+}

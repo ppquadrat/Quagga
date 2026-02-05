@@ -1696,8 +1696,12 @@ def main() -> None:
             if "llm_output" not in rec:
                 rec["llm_output"] = {
                     "ranked_evidence_phrases": [],
-                    "final_question": None,
-                    "question_source": None,
+                    "nl_question": None,
+                    "nl_question_origin": {
+                        "mode": None,
+                        "evidence_ids": [],
+                        "primary_evidence_id": None,
+                    },
                     "confidence": None,
                     "confidence_rationale": None,
                     "needs_review": None,

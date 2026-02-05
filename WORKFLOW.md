@@ -118,8 +118,12 @@ One record per query, with provenance and run history:
       "confidence": null,
       "llm_output": {
         "ranked_evidence_phrases": [],
-        "final_question": null,
-        "question_source": null,
+        "nl_question": null,
+        "nl_question_origin": {
+          "mode": null,
+          "evidence_ids": [],
+          "primary_evidence_id": null
+        },
         "confidence": null,
         "confidence_rationale": null,
         "needs_review": null
@@ -167,6 +171,7 @@ Notes:
 - CQ items are stored as `evidence` entries with `type: cq_item`.
 - `confidence` is a combined score (LLM confidence + runnability + heuristics).
 - `llm_output` stores the generated NL question, provenance, and LLM confidence.
+- Machine-checkable schema for `llm_output`: `schemas/llm_output.schema.json`.
 - `latest_run` and `latest_successful_run` are convenience fields; `run_history` is optional.
 - These run-related fields are populated when producing `run_queries.jsonl`.
 - `dataset` supports future KGs without endpoints (local dumps).
@@ -325,8 +330,12 @@ For each runnable query, generate an object of the form (stored in `llm_output`)
           "verbatim": true
         }
       ],
-      "final_question": "...",
-      "question_source": "verbatim|paraphrased|generated",
+      "nl_question": "...",
+      "nl_question_origin": {
+        "mode": "verbatim|paraphrased|generated",
+        "evidence_ids": ["e12", "e7"],
+        "primary_evidence_id": "e12"
+      },
       "confidence": 92,
       "confidence_rationale": "..."
     }
