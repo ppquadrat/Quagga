@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
@@ -22,6 +24,24 @@ def load_jsonl(path: Path) -> List[Dict[str, Any]]:
                 continue
             rows.append(json.loads(line))
     return rows
+
+
+def load_completed(path: Path) -> set[tuple[str, str, str]]:
+    if not path.exists():
+        return set()
+    completed: set[tuple[str, str, str]] = set()
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            key = (str(rec.get("query_id")), str(rec.get("query_label")), str(rec.get("kg_id")))
+            completed.add(key)
+    return completed
 
 
 def load_examples(path: Optional[Path], limit: int = 2) -> str:
@@ -96,7 +116,7 @@ def build_system_prompt(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run NL generation with OpenAI over LLM inputs JSONL.")
-    parser.add_argument("--input", default="prompts/llm_nl_generation.test_inputs.jsonl")
+    parser.add_argument("--input", default="prompts/llm_nl_generation.inputs.jsonl")
     parser.add_argument("--prompt", default="prompts/llm_nl_generation.prompt.txt")
     parser.add_argument("--schema", default="schemas/llm_output.schema.json")
     parser.add_argument("--examples", default="prompts/llm_nl_generation.examples.jsonl")
@@ -125,9 +145,18 @@ def main() -> None:
     ok_count = 0
     err_count = 0
 
-    with out_path.open("w", encoding="utf-8") as out_f, err_path.open("w", encoding="utf-8") as err_f:
+    completed = load_completed(out_path)
+    with out_path.open("a", encoding="utf-8") as out_f, err_path.open("a", encoding="utf-8") as err_f:
         for idx, payload in enumerate(inputs, start=1):
             user_prompt = json.dumps(payload, ensure_ascii=False, indent=2)
+            label = payload.get("query_label") or payload.get("query_id")
+            kg_id = payload.get("kg_id")
+            key = (str(payload.get("query_id")), str(payload.get("query_label")), str(payload.get("kg_id")))
+            if key in completed:
+                print(f"[{idx}/{len(inputs)}] skip {kg_id} {label} (already done)")
+                continue
+            print(f"[{idx}/{len(inputs)}] running {kg_id} {label}")
+            started = time.time()
             try:
                 resp = client.responses.create(
                     model=args.model,
@@ -149,20 +178,24 @@ def main() -> None:
                     "kg_id": payload.get("kg_id"),
                     "llm_output": parsed,
                     "model": args.model,
+                    "elapsed_ms": int((time.time() - started) * 1000),
+                    "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                 }
                 out_f.write(json.dumps(out_rec, ensure_ascii=False) + "\n")
                 ok_count += 1
-                print(f"[{idx}/{len(inputs)}] ok {payload.get('query_label')}")
+                print(f"[{idx}/{len(inputs)}] ok {payload.get('query_label')} ({out_rec['elapsed_ms']} ms)")
             except Exception as e:
+                elapsed_ms = int((time.time() - started) * 1000)
                 err_rec = {
                     "query_id": payload.get("query_id"),
                     "query_label": payload.get("query_label"),
                     "kg_id": payload.get("kg_id"),
                     "error": str(e),
+                    "elapsed_ms": elapsed_ms,
                 }
                 err_f.write(json.dumps(err_rec, ensure_ascii=False) + "\n")
                 err_count += 1
-                print(f"[{idx}/{len(inputs)}] error {payload.get('query_label')}: {e}")
+                print(f"[{idx}/{len(inputs)}] error {payload.get('query_label')} ({elapsed_ms} ms): {e}")
 
     print(f"Wrote {ok_count} outputs to {out_path.resolve()}")
     if err_count:
