@@ -48,7 +48,7 @@ Example:
           Musical encounters and collaborations extracted from
           musician biographies (c. 1800–1945).
         sparql:
-          endpoint: https://polifonia.kmi.open.ac.uk/meetups/sparql
+          endpoint: https://polifonia.disi.unibo.it/meetups/sparql
           auth: none
         repos:
           - https://github.com/polifonia-project/meetups-kg
@@ -62,8 +62,7 @@ Example:
 To keep provenance and QA explicit, we use **two JSONL files**:
 
 - `kgs.jsonl`: one record per KG (metadata, endpoints, datasets)
-- `kg_queries.jsonl`: one record per query (SPARQL, evidence, NL artifacts)
-- `run_queries.jsonl`: same records enriched with run metadata
+- `kg_queries.jsonl`: one record per query (SPARQL, evidence, NL artifacts, run metadata)
 
 ### `kgs.jsonl` (KG metadata)
 
@@ -75,7 +74,7 @@ Each line is a JSON object. Example:
       "project": "Polifonia",
       "description": "...authoritative KG summary...",
       "sparql": {
-        "endpoint": "https://polifonia.kmi.open.ac.uk/meetups/sparql",
+        "endpoint": "https://polifonia.disi.unibo.it/meetups/sparql",
         "auth": "none",
         "graph": null
       },
@@ -173,7 +172,7 @@ Notes:
 - `llm_output` stores the generated NL question, provenance, and LLM confidence.
 - Machine-checkable schema for `llm_output`: `schemas/llm_output.schema.json`.
 - `latest_run` and `latest_successful_run` are convenience fields; `run_history` is optional.
-- These run-related fields are populated when producing `run_queries.jsonl`.
+- These run-related fields are populated by `run_queries.py` in-place.
 - `dataset` supports future KGs without endpoints (local dumps).
 
 ---
@@ -278,7 +277,7 @@ No filtering and no LLM use at this stage.
 
 ---
 
-## 4. Query execution and filtering (`run_queries.jsonl`)
+## 4. Query execution and run metadata (`kg_queries.jsonl`)
 
 **Goal:** keep only queries that actually run.
 
@@ -300,23 +299,28 @@ For each query:
 
 ### Output
 
-`run_queries.jsonl` (query records with run metadata)
+`kg_queries.jsonl` (updated in-place with run metadata)
 
 This step establishes **ground-truth executability** for each query record.
 
 ---
 
-## 5. Natural-language question and confidence generation (`pairs.jsonl`)
+## 5. Natural-language question and confidence generation
 
 **Goal:** create human-readable NL–SPARQL pairs with confidence estimates.
 
 ### Inputs
 
-- `run_queries.jsonl`
+- `kg_queries.jsonl`
 - KG descriptions from `kgs.jsonl`
 - optional sample result rows
+- prompt + schema files in `prompts/` and `schemas/`
 
 ### Process (LLM with schema enforcement)
+
+1. Build inputs with `build_llm_inputs.py` → `llm_inputs.jsonl`.
+2. Run LLM generation with `run_llm_generation.py` → `llm_outputs.jsonl`.
+3. Merge outputs with `merge_llm_outputs.py` → `kg_queries.jsonl` (updates in-place).
 
 For each runnable query, generate an object of the form (stored in `llm_output`):
 
@@ -357,23 +361,9 @@ Provide the full evidence list to the LLM and specify a preference order by type
 
 Optionally run a second **consistency-check pass** to downgrade overconfident pairs.
 
-### Filtering rule
-
-- Keep only pairs with `confidence ≥ 85`.
-- Lower-confidence pairs go to review or discard.
-
 ### Output
 
-`pairs.jsonl`, one pair per line, including:
-
-- natural-language question
-- SPARQL query
-- confidence score and rationale
-- provenance
-- endpoint
-- test status
-
-This file is the **core dataset**.
+`llm_outputs.jsonl` (LLM results) and `kg_queries.jsonl` (updated in-place).
 
 ---
 
@@ -401,7 +391,9 @@ At minimum, the project produces:
 
 - `seeds.yaml` – control input
 - `kgs.jsonl` – KG catalogue (Quagga-ready)
-- `pairs.jsonl` – validated NL–SPARQL pairs
+- `kg_queries.jsonl` – validated queries with run metadata and `llm_output`
+- `llm_inputs.jsonl` – LLM input payloads
+- `llm_outputs.jsonl` – LLM outputs (before merge)
 
 These outputs can be:
 
@@ -428,4 +420,4 @@ These outputs can be:
 - `seeds.yaml` committed (initial Polifonia KGs)
 - SSH authentication confirmed
 
-**Next step:** implement `build_kgs.py` or run one KG (e.g. MEETUPS) end-to-end as a reference implementation.
+**Next step:** run one KG end-to-end to validate outputs and refine the LLM prompt.
