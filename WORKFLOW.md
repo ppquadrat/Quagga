@@ -1,26 +1,26 @@
 # Workflow: Collecting NL–SPARQL Pairs for Musicological Knowledge Graphs
 
-This repository implements a **reproducible pipeline for collecting, testing, and curating natural-language question–SPARQL query pairs** for musicological Knowledge Graphs (KGs). The resulting dataset is designed for evaluation, benchmarking, and ingestion into systems such as **Quagga**.
+This repository provides a **reproducible pipeline for collecting, testing, and curating natural-language question–SPARQL query pairs** for musicological Knowledge Graphs (KGs). The resulting dataset is intended for evaluation, benchmarking, and ingestion into systems such as **Quagga**.
 
-The workflow deliberately separates **control**, **deterministic processing**, and **LLM-assisted interpretation** to ensure auditability and long-term maintainability.
+The workflow deliberately separates **configuration/selection**, **deterministic processing**, and **LLM-assisted interpretation** to support auditability and long-term maintainability.
 
 ---
 
 ## 0. Design principles
 
-- **YAML = control plane**  
-  Defines what to process and where to find it. No results, no prose.
+- **YAML = selection plane**  
+  Specifies processing scope and source locations
 
 - **JSONL = curated outputs**  
-  One record per line for KGs and NL–SPARQL pairs. Easy to diff, stream, and transform.
+  One record per line for KGs and NL–SPARQL pairs
 
 - **Python = truth layer**  
-  Repo cloning, SPARQL execution, timeouts, provenance, filtering.
+  Repository cloning, SPARQL execution, timeouts, provenance capture, and filtering.
 
 - **LLMs = language and interpretation layer**  
   KG descriptions, natural-language questions, confidence estimates.
 
-This separation avoids hidden state, supports regeneration, and keeps the dataset defensible.
+This separation reduces hidden state, supports regeneration, and preserves dataset defensibility.
 
 ---
 
@@ -59,7 +59,7 @@ Example:
 
 ## 1.5. Data model (schemas)
 
-To keep provenance and QA explicit, we use **two JSONL files**:
+To make provenance and QA explicit, we use **two JSONL files**:
 
 - `kgs.jsonl`: one record per KG (metadata, endpoints, datasets)
 - `kg_queries.jsonl`: one record per query (SPARQL, evidence, NL artifacts, run metadata)
@@ -96,6 +96,7 @@ One record per query, with provenance and run history:
 
     {
       "query_id": "musow__sha256:abc123...",
+      "query_label": "musow-0001",
       "kg_id": "musow",
       "query_type": "select",
       "sparql_raw": "...as extracted...",
@@ -106,10 +107,20 @@ One record per query, with provenance and run history:
         {
           "evidence_id": "e1",
           "type": "repo_file",
-          "source_url": "https://github.com/.../README.md",
-          "source_path": "docs/queries.md",
+          "source_url": "https://github.com/.../queries",
+          "source_path": "docs/query1.sparql",
           "repo_commit": "abc123",
           "snippet": "SELECT ...",
+          "extracted_at": "2026-01-30",
+          "extractor_version": "extract_queries.py@v1"
+        }
+        {
+          "evidence_id": "e2",
+          "type": "cq_item",
+          "source_url": "https://github.com/.../queries",
+          "source_path": "README.md",
+          "repo_commit": "abc123",
+          "snippet": "CQ1 - Where did the concert take place?",
           "extracted_at": "2026-01-30",
           "extractor_version": "extract_queries.py@v1"
         }
@@ -166,20 +177,17 @@ One record per query, with provenance and run history:
 
 Notes:
 
-- `evidence` is the single place for raw extractions (repos/docs/papers/etc).
-- CQ items are stored as `evidence` entries with `type: cq_item`.
+- `evidence` is the place for raw extractions of NL evidence from repos/websites/docs/papers.
 - `confidence` is a combined score (LLM confidence + runnability + heuristics).
 - `llm_output` stores the generated NL question, provenance, and LLM confidence.
-- Machine-checkable schema for `llm_output`: `schemas/llm_output.schema.json`.
-- `latest_run` and `latest_successful_run` are convenience fields; `run_history` is optional.
-- These run-related fields are populated by `run_queries.py` in-place.
-- `dataset` supports future KGs without endpoints (local dumps).
+- `latest_run` and `latest_successful_run` are convenience fields; `run_history` is optional. These run-related fields are populated by `run_queries.py` in-place.
+
 
 ---
 
 ## 2. KG description generation (`kgs.jsonl`)
 
-**Goal:** produce Quagga-ready KG records with rich, citable descriptions.
+**Objective:** produce Quagga-ready KG records with rich, citable descriptions.
 
 ### Inputs
 
@@ -216,13 +224,11 @@ For each KG:
       ]
     }
 
-This file contains the **authoritative KG descriptions**.
-
 ---
 
 ## 3. SPARQL query extraction (`kg_queries.jsonl`)
 
-**Goal:** collect all candidate SPARQL queries with full provenance, without interpretation.
+**Objective:** collect all candidate SPARQL queries with full provenance, without interpretation.
 
 ### Inputs
 
@@ -230,7 +236,7 @@ This file contains the **authoritative KG descriptions**.
 - documentation pages with example queries
 - academic papers containing SPARQL or competency questions (CQs)
 
-### Process (deterministic, Python)
+### Process 
 
 - Clone repositories.
 - Extract:
@@ -248,28 +254,38 @@ This file contains the **authoritative KG descriptions**.
 
 `kg_queries.jsonl` (query records with raw SPARQL, clean SPARQL, and evidence)
 
-No filtering and no LLM use at this stage.
+No filtering or LLM use occurs at this stage.
 
 ---
 
 ## 3.5. Evidence enrichment (`kg_queries.jsonl`)
 
-**Goal:** enrich query records with human-readable evidence from sources.
+**Objective:** enrich query records with human-readable evidence from sources, preserving provenance and evidence types.
 
 ### Inputs
 
 - `kg_queries.jsonl`
 - repositories listed in `seeds.yaml`
-- documentation pages (optional)
-- academic papers (optional)
+- documentation pages and websites (optional)
+- academic papers (PDFs, optional)
 
 ### Process (deterministic)
 
-- For repo files:
-  - Extract leading comment blocks in `.rq`/`.sparql` files.
-  - For Markdown files, pair each fenced `sparql` block with the nearest
-    preceding paragraph as a description.
-- Store extracted text as `evidence` items linked to the query record.
+Extraction targets and evidence types:
+
+- **Repo files**
+  - `.rq`/`.sparql` comments directly above queries → `query_comment`
+  - fenced `sparql` blocks in Markdown with the nearest preceding paragraph → `readme_query_desc`
+  - raw file provenance → `repo_file`
+- **Web/docs (HTML/MD)**
+  - fenced/preformatted `sparql` blocks with the nearest preceding text block → `web_query_desc` / `doc_query_desc`
+  - competency questions listed in headings, bullet lists, or tables → `cq_item`
+- **PDF papers**
+  - SPARQL code blocks in running text → `doc_query_desc` from the nearest preceding paragraphs
+  - SPARQL code embedded in tables/figures/algorithms → capture the table/figure/algorithm as a query; attach the caption as `doc_query_desc`
+  - competency question sections or tables (including captioned tables) → `cq_item`
+
+All evidence items carry `evidence_id`, `source_url`, `source_path`, timestamps, and extractor version metadata.
 
 ### Output
 
@@ -279,23 +295,28 @@ No filtering and no LLM use at this stage.
 
 ## 4. Query execution and run metadata (`kg_queries.jsonl`)
 
-**Goal:** keep only queries that actually run.
+**Objective:** record execution metadata for queries against endpoints or local dumps.
 
 ### Inputs
 
 - `kg_queries.jsonl`
-- SPARQL endpoints from `seeds.yaml`
+- SPARQL endpoints from `seeds.yaml` (plus fallbacks, if configured)
+- local dataset dumps when no endpoint is available
 
 ### Process (deterministic)
 
 For each query:
 
-- Execute against the endpoint with a timeout.
+- Execute against the endpoint with a timeout; if configured, attempt fallbacks.
+- For local dumps:
+  - load the dump into an in-process SPARQL engine
+  - execute the query against the local dataset
 - Record:
   - execution status (`ok`, `empty`, `timeout`, `parse_error`, `auth`, etc.)
   - timestamp
+  - endpoint used (or local dump path)
   - optional first result row
-- Store latest run and latest successful run in the same record.
+- Store `latest_run`, `latest_successful_run`, and append to `run_history`.
 
 ### Output
 
@@ -307,7 +328,7 @@ This step establishes **ground-truth executability** for each query record.
 
 ## 5. Natural-language question and confidence generation
 
-**Goal:** create human-readable NL–SPARQL pairs with confidence estimates.
+**Objective:** create human-readable NL–SPARQL pairs with confidence estimates.
 
 ### Inputs
 
@@ -322,7 +343,7 @@ This step establishes **ground-truth executability** for each query record.
 2. Run LLM generation with `run_llm_generation.py` → `llm_outputs.jsonl`.
 3. Merge outputs with `merge_llm_outputs.py` → `kg_queries.jsonl` (updates in-place).
 
-For each runnable query, generate an object of the form (stored in `llm_output`):
+For each runnable query, generate an object of the following form (stored in `llm_output`):
 
     {
       "ranked_evidence_phrases": [
@@ -346,7 +367,7 @@ For each runnable query, generate an object of the form (stored in `llm_output`)
 
 Guidelines:
 
-- Prefer **simple, human phrasing**.
+- Prefer **clear, concise phrasing**.
 - Avoid ontology jargon unless unavoidable.
 - Lower confidence if semantics are ambiguous.
 
@@ -359,7 +380,7 @@ Provide the full evidence list to the LLM and specify a preference order by type
 3. `cq_item`
 4. general KG descriptions (`kg_summary`, `doc_summary`, `readme_summary`, `web_summary`, `repo_summary`)
 
-Optionally run a second **consistency-check pass** to downgrade overconfident pairs.
+A second **consistency-check pass** may be applied to downgrade overconfident pairs.
 
 ### Output
 
@@ -389,13 +410,13 @@ Paper-derived queries pass through the **same pipeline** as repo-derived ones.
 
 At minimum, the project produces:
 
-- `seeds.yaml` – control input
+- `seeds.yaml` – configuration input
 - `kgs.jsonl` – KG catalogue (Quagga-ready)
 - `kg_queries.jsonl` – validated queries with run metadata and `llm_output`
 - `llm_inputs.jsonl` – LLM input payloads
 - `llm_outputs.jsonl` – LLM outputs (before merge)
 
-These outputs can be:
+These outputs may be:
 
 - ingested into Quagga
 - used for evaluation or benchmarking
@@ -404,20 +425,10 @@ These outputs can be:
 
 ---
 
-## 8. Why this workflow works
+## 8. Rationale
 
 - Every artefact is reproducible.
 - Every query is runnable or explicitly marked otherwise.
 - Every NL question has an explicit confidence estimate.
 - Provenance is preserved end-to-end.
 - LLM use is restricted to tasks where it adds value (language, summarisation).
-
----
-
-## 9. Current status
-
-- Git repository initialised and pushed
-- `seeds.yaml` committed (initial Polifonia KGs)
-- SSH authentication confirmed
-
-**Next step:** run one KG end-to-end to validate outputs and refine the LLM prompt.
